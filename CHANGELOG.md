@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.8 - 2026-05-08
+
+### Highlights
+
+- harden tmux keyword monitoring so stale scrollback and wrapper/audit noise no longer re-trigger false alerts
+- add native hook ingress observability and routing telemetry so dropped, deferred, default-routed, and explicitly-routed hook events are diagnosable without log archaeology
+- make replay/restart handling safer by deferring stale native hook replays before they spray into live channels
+- allow configuring clawhip daemon Tokio worker threads at startup for constrained hosts
+
+### Upgrade notes
+
+- crate version is now `0.6.8`
+- existing route/config schema remains compatible; no migration required
+
 ## 0.6.7 - 2026-04-12
 
 ### Highlights

@@ -808,9 +808,15 @@ mod tests {
         let monitor_args = TmuxMonitorArgs::from_new_args(&args, &config);
 
         assert_eq!(monitor_args.channel.as_deref(), Some("metadata-route"));
+        let expected_worktree_path = repo
+            .path()
+            .canonicalize()
+            .expect("canonical repo path")
+            .to_string_lossy()
+            .to_string();
         assert_eq!(
             monitor_args.routing.worktree_path.as_deref(),
-            Some(repo.path().to_string_lossy().as_ref())
+            Some(expected_worktree_path.as_str())
         );
         assert!(monitor_args.routing.repo_name.is_some());
     }
