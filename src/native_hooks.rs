@@ -128,6 +128,32 @@ pub fn incoming_event_from_native_hook_json(
         &["/source", "/source/name", "/context/source", "/agent_name"],
     )
     .unwrap_or_else(|| provider.clone());
+    let channel = first_string(
+        payload,
+        &[
+            "/channel",
+            "/channel_id",
+            "/channel_hint",
+            "/discord_channel",
+            "/discord_channel_id",
+            "/discord_thread",
+            "/discord_thread_id",
+            "/context/channel",
+            "/context/channel_id",
+            "/context/channel_hint",
+            "/context/discord_channel",
+            "/context/discord_channel_id",
+            "/context/discord_thread",
+            "/context/discord_thread_id",
+            "/event_payload/channel",
+            "/event_payload/channel_id",
+            "/event_payload/channel_hint",
+            "/event_payload/discord_channel",
+            "/event_payload/discord_channel_id",
+            "/event_payload/discord_thread",
+            "/event_payload/discord_thread_id",
+        ],
+    );
     let session_id = first_string(
         payload,
         &[
@@ -203,6 +229,36 @@ pub fn incoming_event_from_native_hook_json(
     if let Some(project_metadata) = project_metadata {
         normalized.insert("project_metadata".into(), project_metadata);
     }
+    if let Some(channel) = channel.as_deref() {
+        normalized.insert("channel".into(), json!(channel));
+        normalized.insert("channel_hint".into(), json!(channel));
+    }
+    copy_string_field(
+        &mut normalized,
+        payload,
+        "discord_channel_id",
+        &[
+            "/discord_channel_id",
+            "/discord_channel",
+            "/context/discord_channel_id",
+            "/context/discord_channel",
+            "/event_payload/discord_channel_id",
+            "/event_payload/discord_channel",
+        ],
+    );
+    copy_string_field(
+        &mut normalized,
+        payload,
+        "discord_thread_id",
+        &[
+            "/discord_thread_id",
+            "/discord_thread",
+            "/context/discord_thread_id",
+            "/context/discord_thread",
+            "/event_payload/discord_thread_id",
+            "/event_payload/discord_thread",
+        ],
+    );
     if let Some(session_id) = session_id {
         normalized.insert("session_id".into(), json!(session_id));
     }
@@ -321,7 +377,7 @@ pub fn incoming_event_from_native_hook_json(
 
     Ok(crate::events::IncomingEvent {
         kind: canonical_kind.to_string(),
-        channel: None,
+        channel,
         mention: None,
         format: None,
         template: None,
@@ -545,6 +601,46 @@ function collectTmuxMetadata(input, cwd) {
   return Object.keys(direct).length > 0 ? direct : null;
 }
 
+function collectDiscordRoutingMetadata(input) {
+  const sources = [input, input?.context, input?.event_payload, input?.payload]
+    .filter((value) => value && typeof value === 'object');
+  const channel =
+    process.env.CLAWHIP_DISCORD_CHANNEL ||
+    process.env.CLAWHIP_DISCORD_THREAD ||
+    pickDiscordString(sources, [
+      'channel',
+      'channel_id',
+      'channel_hint',
+      'discord_channel',
+      'discord_channel_id',
+      'discord_thread',
+      'discord_thread_id',
+    ]);
+
+  if (!channel) return null;
+
+  const thread = process.env.CLAWHIP_DISCORD_THREAD || input?.discord_thread_id || input?.discord_thread || '';
+  const direct = {
+    channel,
+    channel_hint: channel,
+    discord_channel_id: channel,
+  };
+  if (thread) direct.discord_thread_id = thread;
+  return direct;
+}
+
+function pickDiscordString(sources, keys) {
+  for (const source of sources) {
+    for (const key of keys) {
+      const value = source[key];
+      if (typeof value === 'string' && value.trim()) {
+        return value.trim();
+      }
+    }
+  }
+  return '';
+}
+
 function truncate(text, maxLen = 200) {
   if (!text || typeof text !== 'string') return '';
   const trimmed = text.trim();
@@ -609,6 +705,7 @@ async function main() {
     loadProjectMetadata(worktreeRoot) ||
     loadProjectMetadata(eventCwd);
   const tmuxMetadata = collectTmuxMetadata(input, cwd);
+  const discordRoutingMetadata = collectDiscordRoutingMetadata(input);
   const eventName =
     input.hook_event_name || input.hookEventName || input.event_name || input.event || 'unknown';
   const payload = {
@@ -632,6 +729,9 @@ async function main() {
   };
   if (tmuxMetadata) {
     Object.assign(payload, tmuxMetadata);
+  }
+  if (discordRoutingMetadata) {
+    Object.assign(payload, discordRoutingMetadata);
   }
 
   if (projectMetadata && typeof projectMetadata === 'object') {
@@ -1045,6 +1145,50 @@ mod tests {
             assert_eq!(event.payload["provider"], json!(provider));
             assert_eq!(event.payload["repo_name"], json!("clawhip"));
         }
+    }
+
+    #[test]
+    fn native_hook_payload_channel_becomes_event_channel() {
+        let event = incoming_event_from_native_hook_json(&json!({
+            "provider": "codex",
+            "directory": "/repo/clawhip",
+            "event_name": "SessionStart",
+            "channel": "1510730239238606859",
+            "event_payload": {}
+        }))
+        .expect("event");
+
+        assert_eq!(event.channel.as_deref(), Some("1510730239238606859"));
+        assert_eq!(event.payload["channel"], json!("1510730239238606859"));
+        assert_eq!(event.payload["channel_hint"], json!("1510730239238606859"));
+    }
+
+    #[test]
+    fn native_hook_payload_discord_thread_id_becomes_event_channel() {
+        let event = incoming_event_from_native_hook_json(&json!({
+            "provider": "codex",
+            "directory": "/repo/clawhip",
+            "event_name": "SessionStart",
+            "discord_thread_id": "1510730239238606859",
+            "event_payload": {}
+        }))
+        .expect("event");
+
+        assert_eq!(event.channel.as_deref(), Some("1510730239238606859"));
+        assert_eq!(
+            event.payload["discord_thread_id"],
+            json!("1510730239238606859")
+        );
+        assert_eq!(event.payload["channel_hint"], json!("1510730239238606859"));
+    }
+
+    #[test]
+    fn generated_hook_script_mentions_discord_return_channel_env() {
+        let script = generated_hook_script();
+        assert!(script.contains("collectDiscordRoutingMetadata"));
+        assert!(script.contains("CLAWHIP_DISCORD_CHANNEL"));
+        assert!(script.contains("CLAWHIP_DISCORD_THREAD"));
+        assert!(script.contains("discord_thread_id"));
     }
 
     #[test]

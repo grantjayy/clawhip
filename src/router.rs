@@ -294,10 +294,13 @@ impl Router {
                     return Ok(SinkTarget::DiscordWebhook(webhook.to_string()));
                 }
 
-                // For custom events (e.g. `clawhip send --channel X`), the
-                // event-level channel represents explicit user intent and must
-                // take highest priority — above both route and default channels.
-                let channel = if event.canonical_kind() == "custom" {
+                // For custom events (e.g. `clawhip send --channel X`) and
+                // provider-native events carrying an explicit Discord return
+                // target, the event-level channel represents launch-time user
+                // intent and must take highest priority above static routes.
+                let channel = if event.canonical_kind() == "custom"
+                    || has_origin_bound_discord_channel(event)
+                {
                     event
                         .channel
                         .clone()
@@ -332,6 +335,23 @@ impl Router {
             .into()),
         }
     }
+}
+
+fn has_origin_bound_discord_channel(event: &IncomingEvent) -> bool {
+    event
+        .channel
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        && event.payload.as_object().is_some_and(|payload| {
+            ["discord_channel_id", "discord_thread_id", "channel_hint"]
+                .iter()
+                .any(|key| {
+                    payload
+                        .get(*key)
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|value| !value.trim().is_empty())
+                })
+        })
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -672,6 +692,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second, "@eng duplicate: boom");
+    }
+
+    #[tokio::test]
+    async fn origin_bound_discord_channel_overrides_static_route_channel() {
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("fallback".into()),
+                channel_name: None,
+                format: MessageFormat::Compact,
+            },
+            routes: vec![RouteRule {
+                event: "session.*".into(),
+                sink: "discord".into(),
+                filter: [("provider".to_string(), "codex".to_string())]
+                    .into_iter()
+                    .collect(),
+                channel: Some("repo-room".into()),
+                channel_name: None,
+                webhook: None,
+                slack_webhook: None,
+                mention: None,
+                allow_dynamic_tokens: false,
+                format: Some(MessageFormat::Compact),
+                template: None,
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let event = IncomingEvent {
+            kind: "session.started".into(),
+            channel: Some("1510730239238606859".into()),
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({
+                "provider": "codex",
+                "discord_thread_id": "1510730239238606859"
+            }),
+        };
+
+        let deliveries = router.resolve(&event).await.unwrap();
+
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(
+            deliveries[0].target,
+            SinkTarget::DiscordChannel("1510730239238606859".into())
+        );
     }
 
     #[tokio::test]

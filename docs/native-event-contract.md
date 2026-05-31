@@ -51,6 +51,8 @@ fields for routing:
 - `worktree_path`
 - `repo_name`
 - `branch`
+- `channel` / `channel_hint`
+- `discord_channel_id` / `discord_thread_id`
 - `tool_name`
 - `command`
 - `summary`
@@ -63,6 +65,10 @@ fields for routing:
 - Inputs outside a git repo/worktree normalize to an explicit `non_git` outcome and are dropped
   before route evaluation or delivery.
 - `directory` and `worktree_path` are base context, not optional decorations.
+- `channel` / `channel_hint` is an explicit return target when a launcher already knows the
+  Discord destination. This supports origin-bound session routing, including Discord thread IDs.
+- `discord_thread_id` is preserved as metadata; Discord threads are sent through the normal
+  channel delivery path because Discord treats thread IDs as channel IDs for message sends.
 - Tool-specific metadata is additive; it should not replace core routing fields.
 
 ## Augmentation model
@@ -107,6 +113,17 @@ filter = { provider = "codex", repo_path = "*/clawhip" }
 channel = "1480171113253175356"
 format = "compact"
 ```
+
+For launchers that know the originating Discord destination, pass it through the hook environment
+instead of editing static routes per session:
+
+```bash
+CLAWHIP_DISCORD_CHANNEL="1510730239238606859" omx --tmux
+```
+
+`CLAWHIP_DISCORD_THREAD` is also accepted. The generated hook bridge copies either value into the
+native payload as `channel` / `channel_hint` plus Discord metadata, so provider-native events route
+back to that explicit thread/channel before falling back to static route channels.
 
 ## Formatting guidance
 
