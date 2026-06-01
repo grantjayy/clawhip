@@ -104,7 +104,9 @@ impl Router {
         let mut deliveries = Vec::with_capacity(matched_routes.len().max(1));
 
         if matched_routes.is_empty() {
-            deliveries.push(self.resolve_delivery(event, None, None)?);
+            if self.should_resolve_without_matched_route(event) {
+                deliveries.push(self.resolve_delivery(event, None, None)?);
+            }
         } else {
             for route in matched_routes {
                 let index = self
@@ -127,6 +129,21 @@ impl Router {
         }
 
         Ok(deliveries.remove(0))
+    }
+
+    fn should_resolve_without_matched_route(&self, event: &IncomingEvent) -> bool {
+        // Custom events are direct sends; keep `clawhip send --channel ...` working.
+        if event.canonical_kind() == "custom" {
+            return true;
+        }
+
+        // A configured default channel is an explicit operator-level fallback.
+        // Without a default or matching route, provider-native origin channel
+        // metadata should not become a catch-all route by itself; otherwise
+        // launch-context events such as session.started and prompt-submitted
+        // spam Discord/Hermes even when config intentionally names only
+        // end-turn/action-required event patterns.
+        self.config.defaults.channel.is_some()
     }
 
     fn resolve_delivery(
@@ -313,9 +330,13 @@ impl Router {
                 .collect();
 
         let deliveries = if ordered_matched_indices.is_empty() {
-            match self.resolve_delivery(event, None, None) {
-                Ok(d) => vec![delivery_explanation(&d, None)],
-                Err(_) => vec![],
+            if self.should_resolve_without_matched_route(event) {
+                match self.resolve_delivery(event, None, None) {
+                    Ok(d) => vec![delivery_explanation(&d, None)],
+                    Err(_) => vec![],
+                }
+            } else {
+                vec![]
             }
         } else {
             ordered_matched_indices
@@ -845,6 +866,54 @@ mod tests {
             deliveries[0].target,
             SinkTarget::DiscordChannel("1510730239238606859".into())
         );
+    }
+
+    #[tokio::test]
+    async fn origin_bound_channel_without_matching_route_is_not_a_catch_all() {
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: None,
+                channel_name: None,
+                format: MessageFormat::Compact,
+            },
+            routes: vec![RouteRule {
+                event: "session.stopped".into(),
+                sink: "discord".into(),
+                filter: [("provider".to_string(), "codex".to_string())]
+                    .into_iter()
+                    .collect(),
+                channel: Some("repo-room".into()),
+                channel_name: None,
+                webhook: None,
+                slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
+                mention: None,
+                allow_dynamic_tokens: false,
+                format: Some(MessageFormat::Compact),
+                template: None,
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let event = IncomingEvent {
+            kind: "session.started".into(),
+            channel: Some("1510730239238606859".into()),
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({
+                "provider": "codex",
+                "discord_thread_id": "1510730239238606859"
+            }),
+        };
+
+        let deliveries = router.resolve(&event).await.unwrap();
+        let provenance = router.explain(&event);
+
+        assert!(deliveries.is_empty());
+        assert!(provenance.deliveries.is_empty());
     }
 
     #[tokio::test]
