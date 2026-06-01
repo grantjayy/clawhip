@@ -147,6 +147,10 @@ pub struct RouteRule {
     pub channel_name: Option<String>,
     pub webhook: Option<String>,
     pub slack_webhook: Option<String>,
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    pub hmac_secret_env: Option<String>,
     pub mention: Option<String>,
     #[serde(default)]
     pub allow_dynamic_tokens: bool,
@@ -164,6 +168,9 @@ impl Default for RouteRule {
             channel_name: None,
             webhook: None,
             slack_webhook: None,
+            url: None,
+            headers: Default::default(),
+            hmac_secret_env: None,
             mention: None,
             allow_dynamic_tokens: false,
             format: None,
@@ -202,8 +209,18 @@ impl RouteRule {
         })
     }
 
+    fn http_target(&self) -> Option<&str> {
+        (self.effective_sink() == "http")
+            .then(|| non_empty_trimmed(self.url.as_deref()))
+            .flatten()
+    }
+
     fn has_any_webhook_target(&self) -> bool {
         self.discord_webhook_target().is_some() || self.slack_webhook_target().is_some()
+    }
+
+    fn has_any_delivery_target(&self) -> bool {
+        self.has_any_webhook_target() || self.http_target().is_some()
     }
 }
 
@@ -641,6 +658,17 @@ impl AppConfig {
         self.webhook_route_count() > 0
     }
 
+    pub fn delivery_route_count(&self) -> usize {
+        self.routes
+            .iter()
+            .filter(|route| route.has_any_delivery_target())
+            .count()
+    }
+
+    pub fn has_delivery_routes(&self) -> bool {
+        self.delivery_route_count() > 0
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.dispatch.ci_batch_window_secs == 0 {
             return Err("dispatch.ci_batch_window_secs must be at least 1".into());
@@ -659,7 +687,7 @@ impl AppConfig {
                     format!("route #{} ({}) must set a sink", index + 1, route.event).into(),
                 );
             }
-            if !matches!(sink, "discord" | "slack") {
+            if !matches!(sink, "discord" | "slack" | "http") {
                 return Err(format!(
                     "route #{} ({}) uses unsupported sink '{}'",
                     index + 1,
@@ -674,6 +702,24 @@ impl AppConfig {
                     if has_channel && has_discord_webhook {
                         return Err(format!(
                             "route #{} ({}) cannot set both channel and webhook",
+                            index + 1,
+                            route.event
+                        )
+                        .into());
+                    }
+                }
+                "http" => {
+                    if has_channel {
+                        return Err(format!(
+                            "route #{} ({}) cannot set channel when sink = \"http\"",
+                            index + 1,
+                            route.event
+                        )
+                        .into());
+                    }
+                    if route.http_target().is_none() {
+                        return Err(format!(
+                            "route #{} ({}) must set url when sink = \"http\"",
                             index + 1,
                             route.event
                         )
@@ -725,7 +771,7 @@ impl AppConfig {
             }
             if workspace.channel.is_none()
                 && self.defaults.channel.is_none()
-                && !self.has_webhook_routes()
+                && !self.has_delivery_routes()
             {
                 return Err(format!(
                     "workspace monitor #{} has no channel and no default Discord destination",
@@ -744,7 +790,7 @@ impl AppConfig {
             }
         }
 
-        if self.effective_token().is_none() && !self.has_webhook_routes() {
+        if self.effective_token().is_none() && !self.has_delivery_routes() {
             return Err(
                 "missing Discord delivery config: configure [providers.discord].token (or legacy [discord].token) or at least one route webhook"
                     .into(),
@@ -817,6 +863,9 @@ impl AppConfig {
                     channel_name: None,
                     webhook: Some(webhook),
                     slack_webhook: None,
+                    url: None,
+                    headers: Default::default(),
+                    hmac_secret_env: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,
@@ -885,6 +934,9 @@ impl AppConfig {
                     channel_name,
                     webhook: None,
                     slack_webhook: None,
+                    url: None,
+                    headers: Default::default(),
+                    hmac_secret_env: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,
@@ -1033,6 +1085,8 @@ impl AppConfig {
             route.channel_name = normalize_text(route.channel_name.clone());
             route.webhook = normalize_text(route.webhook.clone());
             route.slack_webhook = normalize_text(route.slack_webhook.clone());
+            route.url = normalize_text(route.url.clone());
+            route.hmac_secret_env = normalize_text(route.hmac_secret_env.clone());
             route.mention = normalize_text(route.mention.clone());
             route.template = normalize_text(route.template.clone());
         }
@@ -1293,6 +1347,61 @@ mod tests {
 
         assert!(config.validate().is_ok());
         assert_eq!(config.webhook_route_count(), 1);
+    }
+
+    #[test]
+    fn http_route_satisfies_delivery_validation_without_bot_token() {
+        let config = AppConfig {
+            routes: vec![RouteRule {
+                event: "session.stopped".into(),
+                sink: "http".into(),
+                url: Some("http://127.0.0.1:8080/webhooks/wake/{{hermes_session_id}}".into()),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+
+        assert!(config.validate().is_ok());
+        assert_eq!(config.delivery_route_count(), 1);
+    }
+
+    #[test]
+    fn http_route_requires_url() {
+        let config = AppConfig {
+            providers: ProvidersConfig {
+                discord: DiscordConfig {
+                    bot_token: Some("token".into()),
+                    legacy_default_channel: None,
+                },
+                slack: SlackConfig::default(),
+            },
+            routes: vec![RouteRule {
+                event: "session.stopped".into(),
+                sink: "http".into(),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("must set url when sink = \"http\""));
+    }
+
+    #[test]
+    fn http_route_cannot_set_channel() {
+        let config = AppConfig {
+            routes: vec![RouteRule {
+                event: "session.stopped".into(),
+                sink: "http".into(),
+                channel: Some("ops".into()),
+                url: Some("http://127.0.0.1:8080/webhooks/wake/sess".into()),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("cannot set channel when sink = \"http\""));
     }
 
     #[test]

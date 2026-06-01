@@ -264,8 +264,9 @@ impl Dispatcher {
                 format!("missing sink '{}'", delivery.sink),
             );
             eprintln!(
-                "clawhip dispatcher missing sink '{}' for target {:?}",
-                delivery.sink, delivery.target
+                "clawhip dispatcher missing sink '{}' for target {}",
+                delivery.sink,
+                telemetry::safe_target_id(&delivery.target)
             );
             return;
         };
@@ -284,10 +285,10 @@ impl Dispatcher {
                     error.to_string(),
                 );
                 eprintln!(
-                    "clawhip dispatcher failed to render {} for {}/ {:?}: {error}",
+                    "clawhip dispatcher failed to render {} for {}/{}: {error}",
                     event.canonical_kind(),
                     delivery.sink,
-                    delivery.target
+                    telemetry::safe_target_id(&delivery.target)
                 );
                 return;
             }
@@ -402,8 +403,8 @@ impl Dispatcher {
             record.insert("error".to_string(), json!(error.to_string()));
             telemetry::emit(record);
             eprintln!(
-                "clawhip dispatcher delivery failed to {:?}: {error}",
-                target
+                "clawhip dispatcher delivery failed to {}: {error}",
+                telemetry::safe_target_id(target)
             );
         }
     }
@@ -933,6 +934,10 @@ fn sink_target_key(target: &SinkTarget) -> String {
         SinkTarget::DiscordChannel(channel) => format!("discord-channel:{channel}"),
         SinkTarget::DiscordWebhook(webhook) => format!("discord-webhook:{webhook}"),
         SinkTarget::SlackWebhook(webhook) => format!("slack-webhook:{webhook}"),
+        SinkTarget::Http(target) => format!(
+            "http:{}",
+            crate::telemetry::redacted_url_fingerprint(&target.url)
+        ),
     }
 }
 
@@ -1157,6 +1162,9 @@ mod tests {
                     channel_name: None,
                     webhook: Some(failing_webhook),
                     slack_webhook: None,
+                    url: None,
+                    headers: Default::default(),
+                    hmac_secret_env: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,
@@ -1170,6 +1178,9 @@ mod tests {
                     channel_name: None,
                     webhook: Some(successful_webhook),
                     slack_webhook: None,
+                    url: None,
+                    headers: Default::default(),
+                    hmac_secret_env: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,

@@ -14,7 +14,7 @@ use crate::render::Renderer;
 use crate::sink::Sink;
 #[cfg(test)]
 use crate::sink::SinkMessage;
-use crate::sink::SinkTarget;
+use crate::sink::{HttpTarget, SinkTarget};
 use crate::telemetry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,8 +88,8 @@ impl Router {
             };
             if let Err(error) = sink.send(&delivery.target, &message).await {
                 eprintln!(
-                    "clawhip router delivery failed to {:?}: {error}",
-                    delivery.target
+                    "clawhip router delivery failed to {}: {error}",
+                    telemetry::safe_target_id(&delivery.target)
                 );
             }
         }
@@ -223,7 +223,7 @@ impl Router {
             .await?;
         match delivery.target {
             SinkTarget::DiscordChannel(channel) => Ok((channel, delivery.format, content)),
-            SinkTarget::DiscordWebhook(_) | SinkTarget::SlackWebhook(_) => {
+            SinkTarget::DiscordWebhook(_) | SinkTarget::SlackWebhook(_) | SinkTarget::Http(_) => {
                 Err("matched route uses a webhook instead of a channel".into())
             }
         }
@@ -384,6 +384,43 @@ impl Router {
                     )
                     .into()
                 }),
+            "http" => {
+                let route = route.ok_or_else(|| {
+                    format!(
+                        "no HTTP route configured for event {}",
+                        event.canonical_kind()
+                    )
+                })?;
+                let url = route
+                    .url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        format!(
+                            "no HTTP url configured for event {}",
+                            event.canonical_kind()
+                        )
+                    })?;
+                let context = event.template_context();
+                let render = |value: &str| {
+                    if route.allow_dynamic_tokens {
+                        crate::events::render_template(value, &context)
+                    } else {
+                        value.to_string()
+                    }
+                };
+                let headers = route
+                    .headers
+                    .iter()
+                    .map(|(key, value)| (key.clone(), render(value)))
+                    .collect();
+                Ok(SinkTarget::Http(HttpTarget {
+                    url: render(url),
+                    headers,
+                    hmac_secret_env: route.hmac_secret_env.clone(),
+                }))
+            }
             other => Err(format!(
                 "unsupported sink '{other}' for event {}",
                 event.canonical_kind()
@@ -483,6 +520,10 @@ fn delivery_explanation(
         }
         SinkTarget::DiscordWebhook(url) => (format!("DiscordWebhook({url})"), None),
         SinkTarget::SlackWebhook(url) => (format!("SlackWebhook({url})"), None),
+        SinkTarget::Http(_) => (
+            format!("Http({})", telemetry::safe_target_id(&delivery.target)),
+            None,
+        ),
     };
 
     DeliveryExplanation {
@@ -699,6 +740,9 @@ mod tests {
                     channel_name: None,
                     webhook: None,
                     slack_webhook: None,
+                    url: None,
+                    headers: Default::default(),
+                    hmac_secret_env: None,
                     mention: Some("@ops".into()),
                     allow_dynamic_tokens: false,
                     format: Some(MessageFormat::Alert),
@@ -712,6 +756,9 @@ mod tests {
                     channel_name: None,
                     webhook: None,
                     slack_webhook: None,
+                    url: None,
+                    headers: Default::default(),
+                    hmac_secret_env: None,
                     mention: Some("@eng".into()),
                     allow_dynamic_tokens: false,
                     format: Some(MessageFormat::Compact),
@@ -768,6 +815,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
@@ -813,6 +863,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
@@ -862,6 +915,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: None,
@@ -919,6 +975,9 @@ mod tests {
                     channel_name: None,
                     webhook: Some(failing_webhook),
                     slack_webhook: None,
+                    url: None,
+                    headers: Default::default(),
+                    hmac_secret_env: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,
@@ -932,6 +991,9 @@ mod tests {
                     channel_name: None,
                     webhook: Some(successful_webhook),
                     slack_webhook: None,
+                    url: None,
+                    headers: Default::default(),
+                    hmac_secret_env: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,
@@ -977,6 +1039,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Alert),
@@ -1015,6 +1080,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
@@ -1060,6 +1128,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: Some("<@1465264645320474637>".into()),
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
@@ -1093,6 +1164,9 @@ mod tests {
                     channel_name: None,
                     webhook: None,
                     slack_webhook: None,
+                    url: None,
+                    headers: Default::default(),
+                    hmac_secret_env: None,
                     mention: Some("<@botid>".into()),
                     allow_dynamic_tokens: false,
                     format: Some(MessageFormat::Alert),
@@ -1108,6 +1182,9 @@ mod tests {
                     channel_name: None,
                     webhook: None,
                     slack_webhook: None,
+                    url: None,
+                    headers: Default::default(),
+                    hmac_secret_env: None,
                     mention: Some("<@botid>".into()),
                     allow_dynamic_tokens: false,
                     format: Some(MessageFormat::Alert),
@@ -1147,6 +1224,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: true,
                 format: None,
@@ -1176,6 +1256,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: true,
                 format: None,
@@ -1207,6 +1290,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Alert),
@@ -1242,6 +1328,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: Some("<@route>".into()),
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
@@ -1277,6 +1366,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: Some("<@route>".into()),
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
@@ -1316,6 +1408,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: Some("<@route>".into()),
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
@@ -1363,6 +1458,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Alert),
@@ -1427,6 +1525,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
@@ -1474,6 +1575,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
@@ -1533,6 +1637,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
@@ -1582,6 +1689,9 @@ mod tests {
                     channel_name: None,
                     webhook: None,
                     slack_webhook: None,
+                    url: None,
+                    headers: Default::default(),
+                    hmac_secret_env: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,
@@ -1597,6 +1707,9 @@ mod tests {
                     channel_name: None,
                     webhook: None,
                     slack_webhook: None,
+                    url: None,
+                    headers: Default::default(),
+                    hmac_secret_env: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,
@@ -1629,6 +1742,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: None,
@@ -1667,6 +1783,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: None,
@@ -1696,6 +1815,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: None,
@@ -1838,6 +1960,9 @@ mod tests {
                 channel_name: None,
                 webhook: Some("https://discord.com/api/webhooks/123/abc".into()),
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: None,
@@ -1879,6 +2004,9 @@ mod tests {
                 channel_name: None,
                 webhook: Some("https://discord.com/api/webhooks/123/abc".into()),
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: None,
@@ -1917,6 +2045,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: None,
@@ -1955,6 +2086,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: Some("<@route>".into()),
                 allow_dynamic_tokens: false,
                 format: None,
@@ -1993,6 +2127,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: None,
@@ -2028,6 +2165,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: None,
@@ -2122,6 +2262,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: None,
@@ -2152,6 +2295,9 @@ mod tests {
                 channel_name: None,
                 webhook: None,
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: None,
@@ -2259,6 +2405,9 @@ mod tests {
                 channel_name: None,
                 webhook: Some("https://discord.com/api/webhooks/123/abc".into()),
                 slack_webhook: None,
+                url: None,
+                headers: Default::default(),
+                hmac_secret_env: None,
                 mention: None,
                 allow_dynamic_tokens: false,
                 format: None,
@@ -2535,5 +2684,105 @@ mod tests {
         assert!(parsed["routes"].is_array());
         assert!(parsed["deliveries"].is_array());
         assert_eq!(parsed["deliveries"][0]["sink"], "discord");
+    }
+
+    #[tokio::test]
+    async fn origin_bound_http_wake_url() {
+        let config = AppConfig {
+            routes: vec![RouteRule {
+                event: "session.stopped".into(),
+                sink: "http".into(),
+                url: Some("http://127.0.0.1:8644/webhooks/wake/{hermes_session_id}".into()),
+                headers: BTreeMap::from([("X-Session".into(), "{hermes_session_id}".into())]),
+                hmac_secret_env: Some("HERMES_WEBHOOK_SECRET".into()),
+                allow_dynamic_tokens: true,
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let event = IncomingEvent {
+            kind: "session.stopped".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({"hermes_session_id":"20260531_171628_05f25e"}),
+        };
+
+        let delivery = router.preview_delivery(&event).await.unwrap();
+        assert_eq!(delivery.sink, "http");
+        let SinkTarget::Http(target) = delivery.target else {
+            panic!("expected http target")
+        };
+        assert_eq!(
+            target.url,
+            "http://127.0.0.1:8644/webhooks/wake/20260531_171628_05f25e"
+        );
+        assert_eq!(
+            target.headers.get("X-Session").map(String::as_str),
+            Some("20260531_171628_05f25e")
+        );
+        assert_eq!(
+            target.hmac_secret_env.as_deref(),
+            Some("HERMES_WEBHOOK_SECRET")
+        );
+    }
+
+    #[tokio::test]
+    async fn http_sink_requires_url() {
+        let config = AppConfig {
+            routes: vec![RouteRule {
+                event: "session.stopped".into(),
+                sink: "http".into(),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let event = IncomingEvent {
+            kind: "session.stopped".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({}),
+        };
+        let err = router
+            .preview_delivery(&event)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no HTTP url configured"));
+    }
+
+    #[tokio::test]
+    async fn http_safe_target_id_redacts_query() {
+        let config = AppConfig {
+            routes: vec![RouteRule {
+                event: "session.stopped".into(),
+                sink: "http".into(),
+                url: Some("http://127.0.0.1:8644/webhooks/wake/sess-1?secret=do-not-print".into()),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let event = IncomingEvent {
+            kind: "session.stopped".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({}),
+        };
+        let delivery = router.preview_delivery(&event).await.unwrap();
+        assert!(
+            delivery
+                .trace
+                .target
+                .starts_with("http:127.0.0.1:8644/redacted/")
+        );
+        assert!(!delivery.trace.target.contains("secret=do-not-print"));
     }
 }

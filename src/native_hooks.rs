@@ -279,6 +279,28 @@ pub fn incoming_event_from_native_hook_json(
             "/event_payload/discord_thread",
         ],
     );
+    copy_string_field(
+        &mut normalized,
+        payload,
+        "hermes_session_id",
+        &[
+            "/hermes_session_id",
+            "/context/hermes_session_id",
+            "/event_payload/hermes_session_id",
+            "/payload/hermes_session_id",
+        ],
+    );
+    copy_string_field(
+        &mut normalized,
+        payload,
+        "hermes_wake_url",
+        &[
+            "/hermes_wake_url",
+            "/context/hermes_wake_url",
+            "/event_payload/hermes_wake_url",
+            "/payload/hermes_wake_url",
+        ],
+    );
     if let Some(session_id) = session_id {
         normalized.insert("session_id".into(), json!(session_id));
     }
@@ -649,6 +671,21 @@ function collectDiscordRoutingMetadata(input) {
   return direct;
 }
 
+function collectHermesMetadata(input) {
+  const sources = [input, input?.context, input?.event_payload, input?.payload]
+    .filter((value) => value && typeof value === 'object');
+  const hermesSessionId =
+    process.env.HERMES_SESSION_ID ||
+    pickDiscordString(sources, ['hermes_session_id', 'hermesSessionId']);
+  const hermesWakeUrl =
+    process.env.HERMES_WAKE_URL ||
+    pickDiscordString(sources, ['hermes_wake_url', 'hermesWakeUrl']);
+  const direct = {};
+  if (hermesSessionId) direct.hermes_session_id = hermesSessionId;
+  if (hermesWakeUrl) direct.hermes_wake_url = hermesWakeUrl;
+  return Object.keys(direct).length > 0 ? direct : null;
+}
+
 function pickDiscordString(sources, keys) {
   for (const source of sources) {
     for (const key of keys) {
@@ -726,6 +763,7 @@ async function main() {
     loadProjectMetadata(eventCwd);
   const tmuxMetadata = collectTmuxMetadata(input, cwd);
   const discordRoutingMetadata = collectDiscordRoutingMetadata(input);
+  const hermesMetadata = collectHermesMetadata(input);
   const eventName =
     input.hook_event_name || input.hookEventName || input.event_name || input.event || 'unknown';
   const payload = {
@@ -752,6 +790,9 @@ async function main() {
   }
   if (discordRoutingMetadata) {
     Object.assign(payload, discordRoutingMetadata);
+  }
+  if (hermesMetadata) {
+    Object.assign(payload, hermesMetadata);
   }
 
   if (projectMetadata && typeof projectMetadata === 'object') {
@@ -1703,5 +1744,39 @@ mod tests {
         assert!(script.contains("prompt_summary"));
         assert!(script.contains("stop_context"));
         assert!(script.contains("last_prompt_summary"));
+    }
+
+    #[test]
+    fn native_hook_payload_hermes_session_id() {
+        let event = incoming_event_from_native_hook_json(&json!({
+            "provider": "codex",
+            "directory": "/repo/clawhip",
+            "event_name": "Stop",
+            "event_payload": {
+                "hermes_session_id": "20260531_171628_05f25e"
+            }
+        }))
+        .expect("event");
+
+        assert_eq!(event.kind, "session.stopped");
+        assert_eq!(
+            event.payload["hermes_session_id"],
+            json!("20260531_171628_05f25e")
+        );
+        assert_eq!(
+            event
+                .template_context()
+                .get("hermes_session_id")
+                .map(String::as_str),
+            Some("20260531_171628_05f25e")
+        );
+    }
+
+    #[test]
+    fn generated_hook_script_mentions_hermes_session_env() {
+        let script = super::generated_hook_script();
+        assert!(script.contains("HERMES_SESSION_ID"));
+        assert!(script.contains("HERMES_WAKE_URL"));
+        assert!(script.contains("hermes_session_id"));
     }
 }

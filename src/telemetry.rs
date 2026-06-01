@@ -110,6 +110,9 @@ pub fn safe_target_id(target: &SinkTarget) -> String {
         SinkTarget::SlackWebhook(webhook_url) => {
             format!("slack:webhook:{}", redacted_url_fingerprint(webhook_url))
         }
+        SinkTarget::Http(target) => {
+            format!("http:{}", redacted_url_fingerprint(&target.url))
+        }
     }
 }
 
@@ -118,7 +121,7 @@ pub fn redacted_url_fingerprint(url: &str) -> String {
         .split_once("://")
         .map(|(_, rest)| rest)
         .unwrap_or(url)
-        .split('/')
+        .split(['/', '?', '#'])
         .next()
         .unwrap_or("unknown-host")
         .trim()
@@ -176,6 +179,21 @@ mod tests {
         assert!(!safe.contains("123456"));
         assert!(!safe.contains("secret-token"));
         assert!(!safe.contains(url));
+    }
+
+    #[test]
+    fn safe_target_id_redacts_query_on_no_path_url() {
+        let url = "https://example.com?token=secret#fragment";
+        let safe = safe_target_id(&SinkTarget::Http(crate::sink::HttpTarget {
+            url: url.into(),
+            headers: Default::default(),
+            hmac_secret_env: None,
+        }));
+
+        assert!(safe.starts_with("http:example.com/redacted/"));
+        assert!(!safe.contains("token"));
+        assert!(!safe.contains("secret"));
+        assert!(!safe.contains("fragment"));
     }
 
     #[test]
