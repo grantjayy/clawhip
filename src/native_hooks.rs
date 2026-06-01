@@ -1570,7 +1570,11 @@ mod tests {
         )
         .expect("write project metadata");
         std::fs::write(repo.join("README.md"), "init\n").expect("write");
-        git(&repo, &["add", "README.md", ".clawhip/project.json"]);
+        git(&repo, &["add", "README.md"]);
+        // Grant's global gitignore intentionally ignores `.clawhip/` runtime
+        // state. Force-add this fixture metadata so the e2e test remains
+        // hermetic under that common developer setup.
+        git(&repo, &["add", "-f", ".clawhip/project.json"]);
         git(
             &repo,
             &[
