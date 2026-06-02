@@ -22,6 +22,8 @@ const CIRCUIT_FAILURE_THRESHOLD: u32 = 3;
 const CIRCUIT_COOLDOWN_SECS: u64 = 5;
 const RATE_LIMIT_CAPACITY: u32 = 5;
 const RATE_LIMIT_REFILL_PER_SEC: f64 = 5.0;
+const DISCORD_CONTENT_SAFE_LIMIT: usize = 1900;
+const DISCORD_TRUNCATION_MARKER: &str = "\n… truncated ";
 
 #[derive(Clone)]
 pub struct DiscordClient {
@@ -91,6 +93,16 @@ impl DiscordClient {
     }
 
     pub async fn send(&self, target: &SinkTarget, message: &SinkMessage) -> Result<()> {
+        let outbound_message;
+        let message = if let Some(content) = truncated_discord_content(&message.content) {
+            outbound_message = SinkMessage {
+                content,
+                ..message.clone()
+            };
+            &outbound_message
+        } else {
+            message
+        };
         let key = target_rate_limit_key(target);
         let safe_target = telemetry::safe_target_id(target);
         let telemetry_ctx = telemetry::TelemetryContext::from_message(message);
@@ -559,6 +571,30 @@ fn webhook_url_with_wait(webhook_url: &str) -> String {
     }
 }
 
+fn truncated_discord_content(content: &str) -> Option<String> {
+    if content.len() <= DISCORD_CONTENT_SAFE_LIMIT {
+        return None;
+    }
+
+    let omitted = content.len().saturating_sub(DISCORD_CONTENT_SAFE_LIMIT);
+    let suffix = format!("{DISCORD_TRUNCATION_MARKER}{omitted} bytes");
+    let prefix_limit = DISCORD_CONTENT_SAFE_LIMIT.saturating_sub(suffix.len());
+    let prefix = truncate_at_char_boundary(content, prefix_limit).trim_end();
+    Some(format!("{prefix}{suffix}"))
+}
+
+fn truncate_at_char_boundary(content: &str, max_bytes: usize) -> &str {
+    if content.len() <= max_bytes {
+        return content;
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    &content[..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,6 +624,32 @@ mod tests {
             Some(Duration::from_millis(250))
         );
         assert_eq!(parse_retry_after(StatusCode::BAD_REQUEST, "{}"), None);
+    }
+
+    #[test]
+    fn truncates_discord_content_under_safe_limit() {
+        let content = "x".repeat(DISCORD_CONTENT_SAFE_LIMIT + 500);
+        let truncated = truncated_discord_content(&content).expect("content should truncate");
+
+        assert!(truncated.len() <= DISCORD_CONTENT_SAFE_LIMIT);
+        assert!(truncated.contains("… truncated "));
+        assert!(truncated.ends_with(" bytes"));
+    }
+
+    #[test]
+    fn truncates_discord_content_on_utf8_boundary() {
+        let content = format!("{}{}", "é".repeat(DISCORD_CONTENT_SAFE_LIMIT), "tail");
+        let truncated = truncated_discord_content(&content).expect("content should truncate");
+
+        assert!(truncated.len() <= DISCORD_CONTENT_SAFE_LIMIT);
+        assert!(truncated.is_char_boundary(truncated.len()));
+        assert!(truncated.contains("… truncated "));
+    }
+
+    #[test]
+    fn keeps_short_discord_content_unchanged() {
+        let content = "short message";
+        assert_eq!(truncated_discord_content(content).as_deref(), None);
     }
 
     #[tokio::test]
