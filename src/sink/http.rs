@@ -29,11 +29,14 @@ impl HttpSink {
     }
 
     pub async fn send_http(&self, target: &HttpTarget, message: &SinkMessage) -> Result<()> {
+        let logical_event_id = logical_event_id(message);
         let body = json!({
             "source": "clawhip",
             "event_type": message.event_kind,
             "summary": message.content,
             "payload": message.payload,
+            "event_id": logical_event_id.as_deref(),
+            "idempotency_key": logical_event_id.as_deref(),
             "correlation_id": message.telemetry.as_ref().map(|t| t.correlation_id.as_str()),
             "target": message.telemetry.as_ref().map(|t| t.target.as_str()),
         });
@@ -49,13 +52,17 @@ impl HttpSink {
             .entry(reqwest::header::CONTENT_TYPE)
             .or_insert(HeaderValue::from_static("application/json"));
 
-        if let Some(correlation_id) = message
-            .telemetry
-            .as_ref()
-            .map(|t| t.correlation_id.trim())
-            .filter(|v| !v.is_empty())
+        if let Some(request_id) = logical_event_id
+            .as_deref()
+            .or_else(|| {
+                message
+                    .telemetry
+                    .as_ref()
+                    .map(|t| t.correlation_id.trim())
+                    .filter(|v| !v.is_empty())
+            })
         {
-            headers.insert("x-request-id", HeaderValue::from_str(correlation_id)?);
+            headers.insert("x-request-id", HeaderValue::from_str(request_id)?);
         }
 
         if let Some(env_name) = target
@@ -93,6 +100,16 @@ impl HttpSink {
         let truncated: String = body.chars().take(300).collect();
         Err(format!("HTTP sink POST failed with status {status}: {truncated}").into())
     }
+}
+
+fn logical_event_id(message: &SinkMessage) -> Option<String> {
+    ["event_id", "idempotency_key"]
+        .into_iter()
+        .filter_map(|key| message.payload.get(key))
+        .filter_map(|value| value.as_str())
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[async_trait::async_trait]
@@ -169,6 +186,13 @@ mod tests {
         }
     }
 
+    fn message_with_event_id(event_id: &str) -> SinkMessage {
+        SinkMessage {
+            payload: json!({"hermes_session_id":"sess-1", "event_id": event_id}),
+            ..message()
+        }
+    }
+
     #[tokio::test]
     async fn http_sink_posts_json_headers_and_signature() {
         unsafe {
@@ -201,6 +225,29 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert_eq!(parsed["source"], "clawhip");
         assert_eq!(parsed["event_type"], "session.stopped");
+        assert_eq!(parsed["correlation_id"], "corr-1");
+    }
+
+    #[tokio::test]
+    async fn http_sink_uses_payload_event_id_as_request_identity() {
+        let (url, capture) = start_server(StatusCode::ACCEPTED).await;
+        let target = SinkTarget::Http(HttpTarget {
+            url,
+            headers: BTreeMap::from([("X-Request-ID".into(), "corr-override".into())]),
+            hmac_secret_env: None,
+        });
+        HttpSink::default()
+            .send(&target, &message_with_event_id("event-2"))
+            .await
+            .unwrap();
+
+        let guard = capture.lock().unwrap();
+        let headers = guard.headers.as_ref().unwrap();
+        let body = guard.body.as_ref().unwrap();
+        assert_eq!(headers.get("x-request-id").unwrap(), "event-2");
+        let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(parsed["event_id"], "event-2");
+        assert_eq!(parsed["idempotency_key"], "event-2");
         assert_eq!(parsed["correlation_id"], "corr-1");
     }
 
