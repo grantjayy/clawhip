@@ -52,16 +52,13 @@ impl HttpSink {
             .entry(reqwest::header::CONTENT_TYPE)
             .or_insert(HeaderValue::from_static("application/json"));
 
-        if let Some(request_id) = logical_event_id
-            .as_deref()
-            .or_else(|| {
-                message
-                    .telemetry
-                    .as_ref()
-                    .map(|t| t.correlation_id.trim())
-                    .filter(|v| !v.is_empty())
-            })
-        {
+        if let Some(request_id) = logical_event_id.as_deref().or_else(|| {
+            message
+                .telemetry
+                .as_ref()
+                .map(|t| t.correlation_id.trim())
+                .filter(|v| !v.is_empty())
+        }) {
             headers.insert("x-request-id", HeaderValue::from_str(request_id)?);
         }
 
