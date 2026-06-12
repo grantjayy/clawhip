@@ -188,6 +188,7 @@ mod tests {
             url: url.into(),
             headers: Default::default(),
             hmac_secret_env: None,
+            body: None,
         }));
 
         assert!(safe.starts_with("http:example.com/redacted/"));

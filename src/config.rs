@@ -151,6 +151,7 @@ pub struct RouteRule {
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     pub hmac_secret_env: Option<String>,
+    pub body: Option<String>,
     pub mention: Option<String>,
     #[serde(default)]
     pub allow_dynamic_tokens: bool,
@@ -171,6 +172,7 @@ impl Default for RouteRule {
             url: None,
             headers: Default::default(),
             hmac_secret_env: None,
+            body: None,
             mention: None,
             allow_dynamic_tokens: false,
             format: None,
@@ -725,6 +727,22 @@ impl AppConfig {
                         )
                         .into());
                     }
+                    let http_body = route
+                        .body
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty());
+                    if http_body.is_some_and(|body| body != "hermes_durable") {
+                        return Err(format!(
+                            "route #{} ({}) uses unsupported HTTP body mode",
+                            index + 1,
+                            route.event
+                        )
+                        .into());
+                    }
+                    if http_body == Some("hermes_durable") {
+                        validate_hermes_durable_route(index, route)?;
+                    }
                 }
                 "slack" => {
                     if has_channel {
@@ -866,6 +884,7 @@ impl AppConfig {
                     url: None,
                     headers: Default::default(),
                     hmac_secret_env: None,
+                    body: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,
@@ -937,6 +956,7 @@ impl AppConfig {
                     url: None,
                     headers: Default::default(),
                     hmac_secret_env: None,
+                    body: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,
@@ -1147,6 +1167,52 @@ impl AppConfig {
             .filter(|route| route.has_any_webhook_target())
             .count()
     }
+}
+
+fn validate_hermes_durable_route(index: usize, route: &RouteRule) -> Result<()> {
+    let event = route.event.trim();
+    if event == "session.stopped" {
+        return Err(format!(
+            "route #{} ({}) cannot use body = \"hermes_durable\" for raw session.stopped",
+            index + 1,
+            route.event
+        )
+        .into());
+    }
+    let url = route.url.as_deref().unwrap_or_default();
+    let haystack = format!(
+        "{}\n{}\n{}",
+        url,
+        route.template.as_deref().unwrap_or_default(),
+        route
+            .headers
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+    .to_ascii_lowercase();
+    let old_wake_markers = [
+        "hermes_wake_url",
+        "hermeswakeurl",
+        "hermes_wake",
+        "hermes_session_id",
+        "hermessessionid",
+        "/webhooks/wake/",
+        "omx_semantic_hermes_wake.py",
+    ];
+    if old_wake_markers
+        .iter()
+        .any(|marker| haystack.contains(marker))
+    {
+        return Err(format!(
+            "route #{} ({}) uses legacy wake URL/session template with Hermes durable body",
+            index + 1,
+            route.event
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn is_repo_binding_route(route: &RouteRule, repo: &str) -> bool {
@@ -1402,6 +1468,64 @@ mod tests {
 
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("cannot set channel when sink = \"http\""));
+    }
+
+    #[test]
+    fn hermes_durable_http_route_rejects_raw_session_stopped_and_old_wake_templates() {
+        let raw_stopped = AppConfig {
+            routes: vec![RouteRule {
+                event: "session.stopped".into(),
+                sink: "http".into(),
+                url: Some("http://127.0.0.1:8080/webhooks/durable-agent-events".into()),
+                body: Some("hermes_durable".into()),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+        let error = raw_stopped.validate().unwrap_err().to_string();
+        assert!(error.contains("raw session.stopped"));
+
+        for old_target in [
+            "http://127.0.0.1:8080/webhooks/wake/{hermes_session_id}",
+            "{hermes_wake_url}",
+            "python3 ~/.hermes/scripts/omx_semantic_hermes_wake.py",
+        ] {
+            let config = AppConfig {
+                routes: vec![RouteRule {
+                    event: "session.finished".into(),
+                    sink: "http".into(),
+                    url: Some(old_target.into()),
+                    body: Some("hermes_durable".into()),
+                    allow_dynamic_tokens: true,
+                    ..RouteRule::default()
+                }],
+                ..AppConfig::default()
+            };
+
+            let error = config.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("legacy wake URL/session template"),
+                "target {old_target} should be rejected, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn hermes_durable_http_route_trims_body_mode_before_validation() {
+        let config = AppConfig {
+            routes: vec![RouteRule {
+                event: "session.finished".into(),
+                sink: "http".into(),
+                url: Some("{hermes_wake_url}".into()),
+                body: Some(" hermes_durable ".into()),
+                allow_dynamic_tokens: true,
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("legacy wake URL/session template"));
     }
 
     #[test]

@@ -686,6 +686,25 @@ function collectHermesMetadata(input) {
   return Object.keys(direct).length > 0 ? direct : null;
 }
 
+function collectHermesDurableMetadata(input) {
+  const sources = [input, input?.context, input?.event_payload, input?.payload]
+    .filter((value) => value && typeof value === 'object');
+  const runId =
+    process.env.HERMES_DURABLE_AGENT_RUN_ID ||
+    pickDiscordString(sources, ['run_id', 'runId', 'hermes_durable_agent_run_id']);
+  const originId =
+    process.env.HERMES_ORIGIN_ID ||
+    pickDiscordString(sources, ['origin_id', 'originId', 'hermes_origin_id']);
+  const endpoint =
+    process.env.HERMES_DURABLE_AGENT_EVENT_ENDPOINT ||
+    pickDiscordString(sources, ['durable_agent_event_endpoint', 'hermes_durable_agent_event_endpoint']);
+  const direct = {};
+  if (runId) direct.run_id = runId;
+  if (originId) direct.origin_id = originId;
+  if (endpoint) direct.hermes_durable_agent_event_endpoint = endpoint;
+  return Object.keys(direct).length > 0 ? direct : null;
+}
+
 function pickDiscordString(sources, keys) {
   for (const source of sources) {
     for (const key of keys) {
@@ -764,6 +783,7 @@ async function main() {
   const tmuxMetadata = collectTmuxMetadata(input, cwd);
   const discordRoutingMetadata = collectDiscordRoutingMetadata(input);
   const hermesMetadata = collectHermesMetadata(input);
+  const hermesDurableMetadata = collectHermesDurableMetadata(input);
   const eventName =
     input.hook_event_name || input.hookEventName || input.event_name || input.event || 'unknown';
   const payload = {
@@ -793,6 +813,9 @@ async function main() {
   }
   if (hermesMetadata) {
     Object.assign(payload, hermesMetadata);
+  }
+  if (hermesDurableMetadata) {
+    Object.assign(payload, hermesDurableMetadata);
   }
 
   if (projectMetadata && typeof projectMetadata === 'object') {
@@ -1782,5 +1805,15 @@ mod tests {
         assert!(script.contains("HERMES_SESSION_ID"));
         assert!(script.contains("HERMES_WAKE_URL"));
         assert!(script.contains("hermes_session_id"));
+    }
+
+    #[test]
+    fn generated_hook_script_mentions_hermes_durable_identity_env() {
+        let script = generated_hook_script();
+        assert!(script.contains("HERMES_DURABLE_AGENT_RUN_ID"));
+        assert!(script.contains("HERMES_ORIGIN_ID"));
+        assert!(script.contains("HERMES_DURABLE_AGENT_EVENT_ENDPOINT"));
+        assert!(script.contains("run_id"));
+        assert!(script.contains("origin_id"));
     }
 }

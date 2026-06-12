@@ -932,6 +932,7 @@ mod tests {
                 url: None,
                 headers: Default::default(),
                 hmac_secret_env: None,
+                body: None,
                 mention: Some("<@1465264645320474637>".into()),
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Alert),

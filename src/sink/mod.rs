@@ -28,6 +28,7 @@ pub struct HttpTarget {
     pub url: String,
     pub headers: BTreeMap<String, String>,
     pub hmac_secret_env: Option<String>,
+    pub body: Option<String>,
 }
 
 impl fmt::Debug for HttpTarget {
