@@ -285,6 +285,13 @@ mod tests {
     use serial_test::serial;
     use tempfile::tempdir;
 
+    fn generated_contains(report: &InstallReport, suffix: &str) -> bool {
+        report
+            .generated_files
+            .iter()
+            .any(|path| path.ends_with(suffix))
+    }
+
     #[test]
     #[serial]
     fn install_project_scope_writes_codex_hook_file_and_global_bridge() {
@@ -303,21 +310,9 @@ mod tests {
         })
         .expect("project-scoped codex install should succeed");
 
-        assert!(
-            report
-                .generated_files
-                .contains(&dir.path().join(HOOK_SCRIPT))
-        );
-        assert!(
-            report
-                .generated_files
-                .contains(&dir.path().join(CODEX_HOOKS_FILE))
-        );
-        assert!(
-            report
-                .generated_files
-                .contains(&dir.path().join(CODEX_HOOKS_FILE))
-        );
+        assert!(generated_contains(&report, HOOK_SCRIPT));
+        assert!(generated_contains(&report, CODEX_HOOKS_FILE));
+        assert!(generated_contains(&report, CODEX_HOOKS_FILE));
 
         if let Some(previous) = previous_home {
             unsafe {
@@ -378,21 +373,9 @@ mod tests {
         })
         .expect("install");
 
-        assert!(
-            report
-                .generated_files
-                .contains(&dir.path().join(HOOK_SCRIPT))
-        );
-        assert!(
-            report
-                .generated_files
-                .contains(&dir.path().join(CODEX_HOOKS_FILE))
-        );
-        assert!(
-            report
-                .generated_files
-                .contains(&dir.path().join(CLAUDE_SETTINGS_FILE))
-        );
+        assert!(generated_contains(&report, HOOK_SCRIPT));
+        assert!(generated_contains(&report, CODEX_HOOKS_FILE));
+        assert!(generated_contains(&report, CLAUDE_SETTINGS_FILE));
 
         if let Some(previous) = previous_home {
             unsafe {

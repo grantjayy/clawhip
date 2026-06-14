@@ -878,6 +878,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Alert),
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };

@@ -645,8 +645,14 @@ mod tests {
         let branch_event = rx.try_recv().unwrap();
         assert_eq!(branch_event.kind, "git.branch-changed");
         assert_eq!(branch_event.payload["repo"], "clawhip");
-        assert_eq!(branch_event.payload["repo_path"], path_str(&root));
-        assert_eq!(branch_event.payload["worktree_path"], path_str(&worktree));
+        assert_eq!(
+            payload_path_string(&branch_event.payload["repo_path"]),
+            path_string(&root)
+        );
+        assert_eq!(
+            payload_path_string(&branch_event.payload["worktree_path"]),
+            path_string(&worktree)
+        );
         assert_eq!(branch_event.payload["old_branch"], "feat/issue-115");
         assert_eq!(branch_event.payload["new_branch"], "feat/issue-115-v2");
         assert!(rx.try_recv().is_err());
@@ -659,8 +665,14 @@ mod tests {
         let commit_event = rx.try_recv().unwrap();
         assert_eq!(commit_event.kind, "git.commit");
         assert_eq!(commit_event.payload["repo"], "clawhip");
-        assert_eq!(commit_event.payload["repo_path"], path_str(&root));
-        assert_eq!(commit_event.payload["worktree_path"], path_str(&worktree));
+        assert_eq!(
+            payload_path_string(&commit_event.payload["repo_path"]),
+            path_string(&root)
+        );
+        assert_eq!(
+            payload_path_string(&commit_event.payload["worktree_path"]),
+            path_string(&worktree)
+        );
         assert_eq!(commit_event.payload["branch"], "feat/issue-115-v2");
         assert_eq!(commit_event.payload["summary"], "worktree commit");
         assert!(rx.try_recv().is_err());
@@ -736,6 +748,22 @@ mod tests {
         let mut command_args = vec!["-C", path_str(root)];
         command_args.extend_from_slice(args);
         run_command(&git_bin(), &command_args).await.unwrap();
+    }
+
+    fn canonical_path_string(value: &str) -> String {
+        Path::new(value)
+            .canonicalize()
+            .unwrap_or_else(|_| Path::new(value).to_path_buf())
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn path_string(path: &Path) -> String {
+        canonical_path_string(path.to_str().unwrap())
+    }
+
+    fn payload_path_string(value: &serde_json::Value) -> String {
+        canonical_path_string(value.as_str().unwrap())
     }
 
     fn path_str(path: &Path) -> &str {

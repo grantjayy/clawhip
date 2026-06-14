@@ -162,8 +162,10 @@ impl Router {
             .await?;
         match delivery.target {
             SinkTarget::DiscordChannel(channel) => Ok((channel, delivery.format, content)),
-            SinkTarget::DiscordWebhook(_) | SinkTarget::SlackWebhook(_) => {
-                Err("matched route uses a webhook instead of a channel".into())
+            SinkTarget::DiscordWebhook(_)
+            | SinkTarget::SlackWebhook(_)
+            | SinkTarget::HttpEndpoint { .. } => {
+                Err("matched route uses a non-channel target".into())
             }
         }
     }
@@ -325,6 +327,24 @@ impl Router {
                     )
                     .into()
                 }),
+            "http" => route
+                .and_then(RouteRule::http_target)
+                .map(|url| SinkTarget::HttpEndpoint {
+                    url: url.to_string(),
+                    hmac_secret_env: route
+                        .and_then(RouteRule::hmac_secret_env)
+                        .map(ToString::to_string),
+                    body: route
+                        .and_then(RouteRule::body_mode)
+                        .map(ToString::to_string),
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "no HTTP url configured for event {}",
+                        event.canonical_kind()
+                    )
+                    .into()
+                }),
             other => Err(format!(
                 "unsupported sink '{other}' for event {}",
                 event.canonical_kind()
@@ -407,6 +427,7 @@ fn delivery_explanation(
         }
         SinkTarget::DiscordWebhook(url) => (format!("DiscordWebhook({url})"), None),
         SinkTarget::SlackWebhook(url) => (format!("SlackWebhook({url})"), None),
+        SinkTarget::HttpEndpoint { url, .. } => (format!("HttpEndpoint({url})"), None),
     };
 
     DeliveryExplanation {
@@ -627,6 +648,10 @@ mod tests {
                     allow_dynamic_tokens: false,
                     format: Some(MessageFormat::Alert),
                     template: None,
+
+                    url: None,
+                    hmac_secret_env: None,
+                    body: None,
                 },
                 RouteRule {
                     event: "tmux.*".into(),
@@ -640,6 +665,10 @@ mod tests {
                     allow_dynamic_tokens: false,
                     format: Some(MessageFormat::Compact),
                     template: Some("duplicate: {line}".into()),
+
+                    url: None,
+                    hmac_secret_env: None,
+                    body: None,
                 },
             ],
             ..AppConfig::default()
@@ -694,6 +723,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -752,6 +785,9 @@ mod tests {
                     channel_name: None,
                     webhook: Some(failing_webhook),
                     slack_webhook: None,
+                    url: None,
+                    hmac_secret_env: None,
+                    body: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,
@@ -765,6 +801,9 @@ mod tests {
                     channel_name: None,
                     webhook: Some(successful_webhook),
                     slack_webhook: None,
+                    url: None,
+                    hmac_secret_env: None,
+                    body: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,
@@ -814,6 +853,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Alert),
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -852,6 +895,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -897,6 +944,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -930,6 +981,10 @@ mod tests {
                     allow_dynamic_tokens: false,
                     format: Some(MessageFormat::Alert),
                     template: None,
+
+                    url: None,
+                    hmac_secret_env: None,
+                    body: None,
                 },
                 RouteRule {
                     event: "tmux.*".into(),
@@ -945,6 +1000,10 @@ mod tests {
                     allow_dynamic_tokens: false,
                     format: Some(MessageFormat::Alert),
                     template: None,
+
+                    url: None,
+                    hmac_secret_env: None,
+                    body: None,
                 },
             ],
             ..AppConfig::default()
@@ -984,6 +1043,10 @@ mod tests {
                 allow_dynamic_tokens: true,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1013,6 +1076,10 @@ mod tests {
                 allow_dynamic_tokens: true,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1044,6 +1111,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Alert),
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1079,6 +1150,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1114,6 +1189,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1153,6 +1232,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1200,6 +1283,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Alert),
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1264,6 +1351,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1311,6 +1402,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1370,6 +1465,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Compact),
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1397,6 +1496,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_route_resolves_when_durable_ids_are_present() {
+        let config = Arc::new(AppConfig {
+            routes: vec![RouteRule {
+                event: "session.finished".into(),
+                filter: BTreeMap::from([
+                    ("run_id".into(), "*".into()),
+                    ("origin_id".into(), "*".into()),
+                ]),
+                sink: "http".into(),
+                url: Some("http://127.0.0.1:8644/webhooks/durable-agent-events".into()),
+                hmac_secret_env: Some("WEBHOOK_SECRET".into()),
+                body: Some("hermes_durable".into()),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        });
+        let event = IncomingEvent {
+            kind: "session.finished".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({"run_id": "dar_1", "origin_id": "origin", "event_id": "evt"}),
+        };
+
+        let delivery = Router::new(config)
+            .preview_delivery(&event)
+            .await
+            .expect("delivery");
+
+        assert_eq!(delivery.sink, "http");
+        assert!(matches!(delivery.target, SinkTarget::HttpEndpoint { .. }));
+    }
+
+    #[tokio::test]
+    async fn http_route_does_not_match_when_durable_ids_are_missing() {
+        let config = Arc::new(AppConfig {
+            routes: vec![RouteRule {
+                event: "session.finished".into(),
+                filter: BTreeMap::from([
+                    ("run_id".into(), "*".into()),
+                    ("origin_id".into(), "*".into()),
+                ]),
+                sink: "http".into(),
+                url: Some("http://127.0.0.1:8644/webhooks/durable-agent-events".into()),
+                hmac_secret_env: Some("WEBHOOK_SECRET".into()),
+                body: Some("hermes_durable".into()),
+                ..RouteRule::default()
+            }],
+            defaults: crate::config::DefaultsConfig {
+                channel: Some("fallback".into()),
+                ..Default::default()
+            },
+            ..AppConfig::default()
+        });
+        let event = IncomingEvent {
+            kind: "session.finished".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({"run_id": "dar_1", "event_id": "evt"}),
+        };
+
+        let delivery = Router::new(config)
+            .preview_delivery(&event)
+            .await
+            .expect("fallback delivery");
+
+        assert_eq!(delivery.sink, "discord");
+        assert!(matches!(delivery.target, SinkTarget::DiscordChannel(_)));
+    }
+
+    #[tokio::test]
     async fn filter_can_route_same_event_type_by_repo() {
         let config = AppConfig {
             defaults: DefaultsConfig {
@@ -1415,6 +1588,9 @@ mod tests {
                     channel_name: None,
                     webhook: None,
                     slack_webhook: None,
+                    url: None,
+                    hmac_secret_env: None,
+                    body: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,
@@ -1430,6 +1606,9 @@ mod tests {
                     channel_name: None,
                     webhook: None,
                     slack_webhook: None,
+                    url: None,
+                    hmac_secret_env: None,
+                    body: None,
                     mention: None,
                     allow_dynamic_tokens: false,
                     format: None,
@@ -1466,6 +1645,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1504,6 +1687,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1533,6 +1720,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1675,6 +1866,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1716,6 +1911,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1754,6 +1953,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1792,6 +1995,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1830,6 +2037,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1865,6 +2076,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1959,6 +2174,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -1989,6 +2208,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -2096,6 +2319,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };

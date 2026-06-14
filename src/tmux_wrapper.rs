@@ -745,6 +745,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };
@@ -808,9 +812,15 @@ mod tests {
         let monitor_args = TmuxMonitorArgs::from_new_args(&args, &config);
 
         assert_eq!(monitor_args.channel.as_deref(), Some("metadata-route"));
+        let expected_worktree = repo
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             monitor_args.routing.worktree_path.as_deref(),
-            Some(repo.path().to_string_lossy().as_ref())
+            Some(expected_worktree.as_str())
         );
         assert!(monitor_args.routing.repo_name.is_some());
     }
@@ -852,6 +862,10 @@ mod tests {
                 allow_dynamic_tokens: false,
                 format: None,
                 template: None,
+
+                url: None,
+                hmac_secret_env: None,
+                body: None,
             }],
             ..AppConfig::default()
         };

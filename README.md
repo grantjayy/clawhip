@@ -695,6 +695,21 @@ format = "alert"
 allow_dynamic_tokens = false
 ```
 
+Hermes durable HTTP routes can opt in to a signed machine webhook sink without changing normal Discord/Slack routing:
+
+```toml
+[[routes]]
+event = "session.finished"
+filter = { run_id = "*", origin_id = "*" }
+sink = "http"
+url = "http://127.0.0.1:8644/webhooks/durable-agent-events"
+hmac_secret_env = "WEBHOOK_SECRET"
+body = "hermes_durable"
+format = "compact"
+```
+
+The durable body mode is intentionally narrow. It supports `session.finished`, `session.failed`, and `session.blocked`; it requires `run_id`, `origin_id`, and `event_id` or `idempotency_key`; and it signs the exact JSON body bytes with the secret named by `hmac_secret_env`. Unsupported events such as raw `session.stopped` fail closed instead of waking Hermes.
+
 Resolution rules:
 1. event family match
 2. payload filter match

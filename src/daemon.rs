@@ -21,7 +21,7 @@ use crate::events::{IncomingEvent, MessageFormat, normalize_event};
 use crate::native_hooks::incoming_event_from_native_hook_json;
 use crate::render::{DefaultRenderer, Renderer};
 use crate::router::Router;
-use crate::sink::{DiscordSink, Sink, SlackSink};
+use crate::sink::{DiscordSink, HttpSink, Sink, SlackSink};
 use crate::source::{
     GitHubSource, GitSource, RegisteredTmuxSession, SharedTmuxRegistry, Source, TmuxSource,
     WorkspaceSource, list_active_tmux_registrations,
@@ -54,6 +54,7 @@ pub async fn run(
         Box::new(DiscordSink::from_config(config.clone())?),
     );
     sinks.insert("slack".into(), Box::new(SlackSink::default()));
+    register_http_sink(&mut sinks)?;
     let renderer: Box<dyn Renderer> = Box::new(DefaultRenderer);
     let router = Router::new(config.clone());
     let tmux_registry: SharedTmuxRegistry = Arc::new(RwLock::new(HashMap::new()));
@@ -123,6 +124,11 @@ pub async fn run(
         listener.local_addr()?
     );
     axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn register_http_sink(sinks: &mut HashMap<String, Box<dyn Sink>>) -> Result<()> {
+    sinks.insert("http".into(), Box::new(HttpSink::new()?));
     Ok(())
 }
 
@@ -507,6 +513,14 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
     use tokio::time::{Duration, timeout};
+
+    #[test]
+    fn register_http_sink_adds_dispatcher_sink() {
+        let mut sinks: HashMap<String, Box<dyn Sink>> = HashMap::new();
+        register_http_sink(&mut sinks).expect("register http sink");
+
+        assert!(sinks.contains_key("http"));
+    }
 
     #[test]
     fn health_payload_includes_version_and_token_source() {

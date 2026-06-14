@@ -109,8 +109,8 @@ impl DiscordClient {
                 SinkTarget::DiscordWebhook(webhook_url) => {
                     self.send_webhook(webhook_url, &message.content).await
                 }
-                SinkTarget::SlackWebhook(_) => {
-                    return Err("cannot send Slack webhook via Discord client".into());
+                SinkTarget::SlackWebhook(_) | SinkTarget::HttpEndpoint { .. } => {
+                    return Err("cannot send non-Discord target via Discord client".into());
                 }
             };
 
@@ -377,6 +377,7 @@ fn target_rate_limit_key(target: &SinkTarget) -> String {
         SinkTarget::DiscordChannel(channel_id) => format!("discord:channel:{channel_id}"),
         SinkTarget::DiscordWebhook(webhook_url) => format!("discord:webhook:{webhook_url}"),
         SinkTarget::SlackWebhook(webhook_url) => format!("slack:webhook:{webhook_url}"),
+        SinkTarget::HttpEndpoint { url, .. } => format!("http:{url}"),
     }
 }
 
