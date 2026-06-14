@@ -19,8 +19,10 @@ impl SlackClient {
     pub async fn send(&self, target: &SinkTarget, message: &SinkMessage) -> Result<()> {
         match target {
             SinkTarget::SlackWebhook(webhook_url) => self.send_webhook(webhook_url, message).await,
-            SinkTarget::DiscordChannel(_) | SinkTarget::DiscordWebhook(_) | SinkTarget::Http(_) => {
-                Err("cannot send Discord target via Slack client".into())
+            SinkTarget::DiscordChannel(_)
+            | SinkTarget::DiscordWebhook(_)
+            | SinkTarget::HttpEndpoint { .. } => {
+                Err("cannot send non-Slack target via Slack client".into())
             }
         }
     }
@@ -108,7 +110,6 @@ mod tests {
             format: MessageFormat::Compact,
             content: "tmux:ops matched 'error' => boom".into(),
             payload: serde_json::json!({}),
-            telemetry: None,
         });
 
         assert_eq!(
@@ -133,7 +134,6 @@ mod tests {
             format: MessageFormat::Alert,
             content: "🚨 deploy <failed> & paging".into(),
             payload: serde_json::json!({}),
-            telemetry: None,
         });
 
         let blocks = payload

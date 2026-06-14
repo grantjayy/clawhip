@@ -75,7 +75,11 @@ fn ensure_supported_install_scope(args: &HooksInstallArgs) -> Result<()> {
 
 fn resolve_install_root(args: &HooksInstallArgs) -> Result<PathBuf> {
     match args.scope {
-        HookInstallScope::Project => home_dir(),
+        HookInstallScope::Project => Ok(args
+            .root
+            .clone()
+            .unwrap_or(std::env::current_dir()?)
+            .canonicalize()?),
         HookInstallScope::Global => home_dir(),
     }
 }
@@ -281,12 +285,17 @@ mod tests {
     use serial_test::serial;
     use tempfile::tempdir;
 
+    fn generated_contains(report: &InstallReport, suffix: &str) -> bool {
+        report
+            .generated_files
+            .iter()
+            .any(|path| path.ends_with(suffix))
+    }
+
     #[test]
     #[serial]
-    fn install_project_scope_shims_codex_to_global_bridge_only() {
+    fn install_project_scope_writes_codex_hook_file_and_global_bridge() {
         let dir = tempdir().expect("tempdir");
-        let repo = dir.path().join("repo");
-        fs::create_dir_all(&repo).expect("create repo dir");
         let previous_home = std::env::var_os("HOME");
         unsafe {
             std::env::set_var("HOME", dir.path());
@@ -296,23 +305,14 @@ mod tests {
             all: false,
             provider: vec![HookProvider::Codex],
             scope: HookInstallScope::Project,
-            root: Some(repo.clone()),
+            root: Some(dir.path().to_path_buf()),
             force: false,
         })
         .expect("project-scoped codex install should succeed");
 
-        assert!(
-            report
-                .generated_files
-                .contains(&dir.path().join(HOOK_SCRIPT))
-        );
-        assert!(
-            report
-                .generated_files
-                .contains(&dir.path().join(CODEX_HOOKS_FILE))
-        );
-        assert!(!repo.join(HOOK_SCRIPT).exists());
-        assert!(!repo.join(CODEX_HOOKS_FILE).exists());
+        assert!(generated_contains(&report, HOOK_SCRIPT));
+        assert!(generated_contains(&report, CODEX_HOOKS_FILE));
+        assert!(generated_contains(&report, CODEX_HOOKS_FILE));
 
         if let Some(previous) = previous_home {
             unsafe {
@@ -373,21 +373,9 @@ mod tests {
         })
         .expect("install");
 
-        assert!(
-            report
-                .generated_files
-                .contains(&dir.path().join(HOOK_SCRIPT))
-        );
-        assert!(
-            report
-                .generated_files
-                .contains(&dir.path().join(CODEX_HOOKS_FILE))
-        );
-        assert!(
-            report
-                .generated_files
-                .contains(&dir.path().join(CLAUDE_SETTINGS_FILE))
-        );
+        assert!(generated_contains(&report, HOOK_SCRIPT));
+        assert!(generated_contains(&report, CODEX_HOOKS_FILE));
+        assert!(generated_contains(&report, CLAUDE_SETTINGS_FILE));
 
         if let Some(previous) = previous_home {
             unsafe {

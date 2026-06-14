@@ -148,8 +148,6 @@ pub struct RouteRule {
     pub webhook: Option<String>,
     pub slack_webhook: Option<String>,
     pub url: Option<String>,
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
     pub hmac_secret_env: Option<String>,
     pub body: Option<String>,
     pub mention: Option<String>,
@@ -170,7 +168,6 @@ impl Default for RouteRule {
             webhook: None,
             slack_webhook: None,
             url: None,
-            headers: Default::default(),
             hmac_secret_env: None,
             body: None,
             mention: None,
@@ -211,18 +208,22 @@ impl RouteRule {
         })
     }
 
-    fn http_target(&self) -> Option<&str> {
-        (self.effective_sink() == "http")
-            .then(|| non_empty_trimmed(self.url.as_deref()))
-            .flatten()
+    pub fn http_target(&self) -> Option<&str> {
+        non_empty_trimmed(self.url.as_deref())
+    }
+
+    pub fn hmac_secret_env(&self) -> Option<&str> {
+        non_empty_trimmed(self.hmac_secret_env.as_deref())
+    }
+
+    pub fn body_mode(&self) -> Option<&str> {
+        non_empty_trimmed(self.body.as_deref())
     }
 
     fn has_any_webhook_target(&self) -> bool {
-        self.discord_webhook_target().is_some() || self.slack_webhook_target().is_some()
-    }
-
-    fn has_any_delivery_target(&self) -> bool {
-        self.has_any_webhook_target() || self.http_target().is_some()
+        self.discord_webhook_target().is_some()
+            || self.slack_webhook_target().is_some()
+            || (self.effective_sink() == "http" && self.http_target().is_some())
     }
 }
 
@@ -660,17 +661,6 @@ impl AppConfig {
         self.webhook_route_count() > 0
     }
 
-    pub fn delivery_route_count(&self) -> usize {
-        self.routes
-            .iter()
-            .filter(|route| route.has_any_delivery_target())
-            .count()
-    }
-
-    pub fn has_delivery_routes(&self) -> bool {
-        self.delivery_route_count() > 0
-    }
-
     pub fn validate(&self) -> Result<()> {
         if self.dispatch.ci_batch_window_secs == 0 {
             return Err("dispatch.ci_batch_window_secs must be at least 1".into());
@@ -709,39 +699,16 @@ impl AppConfig {
                         )
                         .into());
                     }
-                }
-                "http" => {
-                    if has_channel {
+                    if route.http_target().is_some()
+                        || route.body_mode().is_some()
+                        || route.hmac_secret_env().is_some()
+                    {
                         return Err(format!(
-                            "route #{} ({}) cannot set channel when sink = \"http\"",
+                            "route #{} ({}) cannot set HTTP-only fields when sink = \"discord\"",
                             index + 1,
                             route.event
                         )
                         .into());
-                    }
-                    if route.http_target().is_none() {
-                        return Err(format!(
-                            "route #{} ({}) must set url when sink = \"http\"",
-                            index + 1,
-                            route.event
-                        )
-                        .into());
-                    }
-                    let http_body = route
-                        .body
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|v| !v.is_empty());
-                    if http_body.is_some_and(|body| body != "hermes_durable") {
-                        return Err(format!(
-                            "route #{} ({}) uses unsupported HTTP body mode",
-                            index + 1,
-                            route.event
-                        )
-                        .into());
-                    }
-                    if http_body == Some("hermes_durable") {
-                        validate_hermes_durable_route(index, route)?;
                     }
                 }
                 "slack" => {
@@ -771,6 +738,78 @@ impl AppConfig {
                         )
                         .into());
                     }
+                    if route.http_target().is_some()
+                        || route.body_mode().is_some()
+                        || route.hmac_secret_env().is_some()
+                    {
+                        return Err(format!(
+                            "route #{} ({}) cannot set HTTP-only fields when sink = \"slack\"",
+                            index + 1,
+                            route.event
+                        )
+                        .into());
+                    }
+                }
+                "http" => {
+                    if !has_discord_webhook && normalize_secret(route.webhook.clone()).is_some() {
+                        return Err(format!(
+                            "route #{} ({}) cannot set webhook when sink = \"http\"",
+                            index + 1,
+                            route.event
+                        )
+                        .into());
+                    }
+                    if has_channel
+                        || route
+                            .channel_name
+                            .as_deref()
+                            .map(str::trim)
+                            .is_some_and(|value| !value.is_empty())
+                        || has_discord_webhook
+                        || has_slack_webhook
+                    {
+                        return Err(format!(
+                            "route #{} ({}) cannot set Discord/Slack destination fields when sink = \"http\"",
+                            index + 1,
+                            route.event
+                        )
+                        .into());
+                    }
+                    if route.http_target().is_none() {
+                        return Err(format!(
+                            "route #{} ({}) must set url when sink = \"http\"",
+                            index + 1,
+                            route.event
+                        )
+                        .into());
+                    }
+                    match route.body_mode() {
+                        Some("hermes_durable") => {}
+                        Some(body) => {
+                            return Err(format!(
+                                "route #{} ({}) uses unsupported HTTP body '{body}'",
+                                index + 1,
+                                route.event
+                            )
+                            .into());
+                        }
+                        None => {
+                            return Err(format!(
+                                "route #{} ({}) must set body = \"hermes_durable\" when sink = \"http\"",
+                                index + 1,
+                                route.event
+                            )
+                            .into());
+                        }
+                    }
+                    if route.hmac_secret_env().is_none() {
+                        return Err(format!(
+                            "route #{} ({}) must set hmac_secret_env when body = \"hermes_durable\"",
+                            index + 1,
+                            route.event
+                        )
+                        .into());
+                    }
                 }
                 _ => unreachable!(),
             }
@@ -789,7 +828,7 @@ impl AppConfig {
             }
             if workspace.channel.is_none()
                 && self.defaults.channel.is_none()
-                && !self.has_delivery_routes()
+                && !self.has_webhook_routes()
             {
                 return Err(format!(
                     "workspace monitor #{} has no channel and no default Discord destination",
@@ -808,7 +847,7 @@ impl AppConfig {
             }
         }
 
-        if self.effective_token().is_none() && !self.has_delivery_routes() {
+        if self.effective_token().is_none() && !self.has_webhook_routes() {
             return Err(
                 "missing Discord delivery config: configure [providers.discord].token (or legacy [discord].token) or at least one route webhook"
                     .into(),
@@ -882,7 +921,6 @@ impl AppConfig {
                     webhook: Some(webhook),
                     slack_webhook: None,
                     url: None,
-                    headers: Default::default(),
                     hmac_secret_env: None,
                     body: None,
                     mention: None,
@@ -954,7 +992,6 @@ impl AppConfig {
                     webhook: None,
                     slack_webhook: None,
                     url: None,
-                    headers: Default::default(),
                     hmac_secret_env: None,
                     body: None,
                     mention: None,
@@ -1105,8 +1142,6 @@ impl AppConfig {
             route.channel_name = normalize_text(route.channel_name.clone());
             route.webhook = normalize_text(route.webhook.clone());
             route.slack_webhook = normalize_text(route.slack_webhook.clone());
-            route.url = normalize_text(route.url.clone());
-            route.hmac_secret_env = normalize_text(route.hmac_secret_env.clone());
             route.mention = normalize_text(route.mention.clone());
             route.template = normalize_text(route.template.clone());
         }
@@ -1167,52 +1202,6 @@ impl AppConfig {
             .filter(|route| route.has_any_webhook_target())
             .count()
     }
-}
-
-fn validate_hermes_durable_route(index: usize, route: &RouteRule) -> Result<()> {
-    let event = route.event.trim();
-    if event == "session.stopped" {
-        return Err(format!(
-            "route #{} ({}) cannot use body = \"hermes_durable\" for raw session.stopped",
-            index + 1,
-            route.event
-        )
-        .into());
-    }
-    let url = route.url.as_deref().unwrap_or_default();
-    let haystack = format!(
-        "{}\n{}\n{}",
-        url,
-        route.template.as_deref().unwrap_or_default(),
-        route
-            .headers
-            .values()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n")
-    )
-    .to_ascii_lowercase();
-    let old_wake_markers = [
-        "hermes_wake_url",
-        "hermeswakeurl",
-        "hermes_wake",
-        "hermes_session_id",
-        "hermessessionid",
-        "/webhooks/wake/",
-        "omx_semantic_hermes_wake.py",
-    ];
-    if old_wake_markers
-        .iter()
-        .any(|marker| haystack.contains(marker))
-    {
-        return Err(format!(
-            "route #{} ({}) uses legacy wake URL/session template with Hermes durable body",
-            index + 1,
-            route.event
-        )
-        .into());
-    }
-    Ok(())
 }
 
 fn is_repo_binding_route(route: &RouteRule, repo: &str) -> bool {
@@ -1413,119 +1402,6 @@ mod tests {
 
         assert!(config.validate().is_ok());
         assert_eq!(config.webhook_route_count(), 1);
-    }
-
-    #[test]
-    fn http_route_satisfies_delivery_validation_without_bot_token() {
-        let config = AppConfig {
-            routes: vec![RouteRule {
-                event: "session.stopped".into(),
-                sink: "http".into(),
-                url: Some("http://127.0.0.1:8080/webhooks/wake/{{hermes_session_id}}".into()),
-                ..RouteRule::default()
-            }],
-            ..AppConfig::default()
-        };
-
-        assert!(config.validate().is_ok());
-        assert_eq!(config.delivery_route_count(), 1);
-    }
-
-    #[test]
-    fn http_route_requires_url() {
-        let config = AppConfig {
-            providers: ProvidersConfig {
-                discord: DiscordConfig {
-                    bot_token: Some("token".into()),
-                    legacy_default_channel: None,
-                },
-                slack: SlackConfig::default(),
-            },
-            routes: vec![RouteRule {
-                event: "session.stopped".into(),
-                sink: "http".into(),
-                ..RouteRule::default()
-            }],
-            ..AppConfig::default()
-        };
-
-        let error = config.validate().unwrap_err().to_string();
-        assert!(error.contains("must set url when sink = \"http\""));
-    }
-
-    #[test]
-    fn http_route_cannot_set_channel() {
-        let config = AppConfig {
-            routes: vec![RouteRule {
-                event: "session.stopped".into(),
-                sink: "http".into(),
-                channel: Some("ops".into()),
-                url: Some("http://127.0.0.1:8080/webhooks/wake/sess".into()),
-                ..RouteRule::default()
-            }],
-            ..AppConfig::default()
-        };
-
-        let error = config.validate().unwrap_err().to_string();
-        assert!(error.contains("cannot set channel when sink = \"http\""));
-    }
-
-    #[test]
-    fn hermes_durable_http_route_rejects_raw_session_stopped_and_old_wake_templates() {
-        let raw_stopped = AppConfig {
-            routes: vec![RouteRule {
-                event: "session.stopped".into(),
-                sink: "http".into(),
-                url: Some("http://127.0.0.1:8080/webhooks/durable-agent-events".into()),
-                body: Some("hermes_durable".into()),
-                ..RouteRule::default()
-            }],
-            ..AppConfig::default()
-        };
-        let error = raw_stopped.validate().unwrap_err().to_string();
-        assert!(error.contains("raw session.stopped"));
-
-        for old_target in [
-            "http://127.0.0.1:8080/webhooks/wake/{hermes_session_id}",
-            "{hermes_wake_url}",
-            "python3 ~/.hermes/scripts/omx_semantic_hermes_wake.py",
-        ] {
-            let config = AppConfig {
-                routes: vec![RouteRule {
-                    event: "session.finished".into(),
-                    sink: "http".into(),
-                    url: Some(old_target.into()),
-                    body: Some("hermes_durable".into()),
-                    allow_dynamic_tokens: true,
-                    ..RouteRule::default()
-                }],
-                ..AppConfig::default()
-            };
-
-            let error = config.validate().unwrap_err().to_string();
-            assert!(
-                error.contains("legacy wake URL/session template"),
-                "target {old_target} should be rejected, got {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn hermes_durable_http_route_trims_body_mode_before_validation() {
-        let config = AppConfig {
-            routes: vec![RouteRule {
-                event: "session.finished".into(),
-                sink: "http".into(),
-                url: Some("{hermes_wake_url}".into()),
-                body: Some(" hermes_durable ".into()),
-                allow_dynamic_tokens: true,
-                ..RouteRule::default()
-            }],
-            ..AppConfig::default()
-        };
-
-        let error = config.validate().unwrap_err().to_string();
-        assert!(error.contains("legacy wake URL/session template"));
     }
 
     #[test]
@@ -1919,6 +1795,76 @@ mod tests {
         assert_eq!(config.dispatch.routine_batch_window_secs, 0);
         assert_eq!(config.dispatch.routine_batch_window(), None);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_valid_http_durable_route() {
+        let mut config = AppConfig::default();
+        config.routes.push(RouteRule {
+            event: "session.finished".into(),
+            filter: BTreeMap::from([
+                ("run_id".into(), "*".into()),
+                ("origin_id".into(), "*".into()),
+            ]),
+            sink: "http".into(),
+            url: Some("http://127.0.0.1:8644/webhooks/durable-agent-events".into()),
+            hmac_secret_env: Some("WEBHOOK_SECRET".into()),
+            body: Some("hermes_durable".into()),
+            ..RouteRule::default()
+        });
+
+        config.validate().expect("valid http route");
+    }
+
+    #[test]
+    fn validate_rejects_malformed_http_durable_routes() {
+        let base = RouteRule {
+            event: "session.finished".into(),
+            filter: BTreeMap::from([
+                ("run_id".into(), "*".into()),
+                ("origin_id".into(), "*".into()),
+            ]),
+            sink: "http".into(),
+            url: Some("http://127.0.0.1:8644/webhooks/durable-agent-events".into()),
+            hmac_secret_env: Some("WEBHOOK_SECRET".into()),
+            body: Some("hermes_durable".into()),
+            ..RouteRule::default()
+        };
+
+        for route in [
+            RouteRule {
+                url: None,
+                ..base.clone()
+            },
+            RouteRule {
+                hmac_secret_env: None,
+                ..base.clone()
+            },
+            RouteRule {
+                body: Some("raw".into()),
+                ..base.clone()
+            },
+            RouteRule {
+                channel: Some("C123".into()),
+                ..base.clone()
+            },
+            RouteRule {
+                webhook: Some("https://discord.example".into()),
+                ..base.clone()
+            },
+            RouteRule {
+                slack_webhook: Some("https://slack.example".into()),
+                ..base.clone()
+            },
+            RouteRule {
+                sink: "discord".into(),
+                ..base.clone()
+            },
+        ] {
+            let mut config = AppConfig::default();
+            config.routes.push(route);
+            assert!(config.validate().is_err());
+        }
     }
 
     #[test]

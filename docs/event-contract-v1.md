@@ -45,8 +45,6 @@ After clawhip normalizes a provider payload, these base routing fields are the v
 | `project` | when known | Optional display metadata from provider payloads; not authoritative for routing. |
 | `session_id` | no | Provider/session correlation identifier. |
 | `branch` | when known | Git branch when available. |
-| `channel` / `channel_hint` | no | Explicit return target supplied by the launcher; used for origin-bound session routing. |
-| `discord_channel_id` / `discord_thread_id` | no | Discord destination metadata. Thread IDs are valid channel targets for delivery. |
 | `tool_name` | tool events | Tool identifier for pre/post tool hooks. |
 | `command` | tool events | Command context when a provider supplies it. |
 | `summary` | no | Short human-readable context. |

@@ -18,7 +18,9 @@ pub const CODEX_HOOKS_FILE: &str = ".codex/hooks.json";
 #[allow(dead_code)]
 pub const CODEX_CONFIG_FILE: &str = ".codex/config.toml";
 pub const CLAUDE_SETTINGS_FILE: &str = ".claude/settings.json";
+#[allow(dead_code)]
 pub const NATIVE_NORMALIZATION_OUTCOME_FIELD: &str = "normalization_outcome";
+#[allow(dead_code)]
 pub const NATIVE_NON_GIT_OUTCOME: &str = "non_git";
 pub const SHARED_HOOK_EVENTS: [&str; 5] = [
     "SessionStart",
@@ -65,25 +67,11 @@ pub fn incoming_event_from_native_hook_json(
     );
     let worktree_path = first_string(payload, &["/worktree_path", "/context/worktree_path"])
         .or_else(|| directory.clone());
-    let explicit_normalization_outcome = first_string(
-        payload,
-        &[
-            "/normalization_outcome",
-            "/context/normalization_outcome",
-            "/event_payload/normalization_outcome",
-            "/payload/normalization_outcome",
-        ],
-    );
     let repo_path = first_string(payload, &["/repo_path", "/context/repo_path"]).or_else(|| {
         worktree_path
             .as_deref()
             .and_then(infer_repo_root)
             .map(|path| path.to_string_lossy().into_owned())
-    });
-    let normalization_outcome = explicit_normalization_outcome.or_else(|| {
-        repo_path
-            .is_none()
-            .then(|| NATIVE_NON_GIT_OUTCOME.to_string())
     });
     let project_metadata = load_effective_project_metadata(
         payload,
@@ -142,32 +130,6 @@ pub fn incoming_event_from_native_hook_json(
         &["/source", "/source/name", "/context/source", "/agent_name"],
     )
     .unwrap_or_else(|| provider.clone());
-    let channel = first_string(
-        payload,
-        &[
-            "/channel",
-            "/channel_id",
-            "/channel_hint",
-            "/discord_channel",
-            "/discord_channel_id",
-            "/discord_thread",
-            "/discord_thread_id",
-            "/context/channel",
-            "/context/channel_id",
-            "/context/channel_hint",
-            "/context/discord_channel",
-            "/context/discord_channel_id",
-            "/context/discord_thread",
-            "/context/discord_thread_id",
-            "/event_payload/channel",
-            "/event_payload/channel_id",
-            "/event_payload/channel_hint",
-            "/event_payload/discord_channel",
-            "/event_payload/discord_channel_id",
-            "/event_payload/discord_thread",
-            "/event_payload/discord_thread_id",
-        ],
-    );
     let session_id = first_string(
         payload,
         &[
@@ -230,12 +192,6 @@ pub fn incoming_event_from_native_hook_json(
     if let Some(repo_path) = repo_path {
         normalized.insert("repo_path".into(), json!(repo_path));
     }
-    if let Some(normalization_outcome) = normalization_outcome {
-        normalized.insert(
-            NATIVE_NORMALIZATION_OUTCOME_FIELD.into(),
-            json!(normalization_outcome),
-        );
-    }
     if let Some(repo_name) = repo_name {
         normalized.insert("repo_name".into(), json!(repo_name));
     }
@@ -249,58 +205,6 @@ pub fn incoming_event_from_native_hook_json(
     if let Some(project_metadata) = project_metadata {
         normalized.insert("project_metadata".into(), project_metadata);
     }
-    if let Some(channel) = channel.as_deref() {
-        normalized.insert("channel".into(), json!(channel));
-        normalized.insert("channel_hint".into(), json!(channel));
-    }
-    copy_string_field(
-        &mut normalized,
-        payload,
-        "discord_channel_id",
-        &[
-            "/discord_channel_id",
-            "/discord_channel",
-            "/context/discord_channel_id",
-            "/context/discord_channel",
-            "/event_payload/discord_channel_id",
-            "/event_payload/discord_channel",
-        ],
-    );
-    copy_string_field(
-        &mut normalized,
-        payload,
-        "discord_thread_id",
-        &[
-            "/discord_thread_id",
-            "/discord_thread",
-            "/context/discord_thread_id",
-            "/context/discord_thread",
-            "/event_payload/discord_thread_id",
-            "/event_payload/discord_thread",
-        ],
-    );
-    copy_string_field(
-        &mut normalized,
-        payload,
-        "hermes_session_id",
-        &[
-            "/hermes_session_id",
-            "/context/hermes_session_id",
-            "/event_payload/hermes_session_id",
-            "/payload/hermes_session_id",
-        ],
-    );
-    copy_string_field(
-        &mut normalized,
-        payload,
-        "hermes_wake_url",
-        &[
-            "/hermes_wake_url",
-            "/context/hermes_wake_url",
-            "/event_payload/hermes_wake_url",
-            "/payload/hermes_wake_url",
-        ],
-    );
     if let Some(session_id) = session_id {
         normalized.insert("session_id".into(), json!(session_id));
     }
@@ -419,7 +323,7 @@ pub fn incoming_event_from_native_hook_json(
 
     Ok(crate::events::IncomingEvent {
         kind: canonical_kind.to_string(),
-        channel,
+        channel: None,
         mention: None,
         format: None,
         template: None,
@@ -643,80 +547,6 @@ function collectTmuxMetadata(input, cwd) {
   return Object.keys(direct).length > 0 ? direct : null;
 }
 
-function collectDiscordRoutingMetadata(input) {
-  const sources = [input, input?.context, input?.event_payload, input?.payload]
-    .filter((value) => value && typeof value === 'object');
-  const channel =
-    process.env.CLAWHIP_DISCORD_CHANNEL ||
-    process.env.CLAWHIP_DISCORD_THREAD ||
-    pickDiscordString(sources, [
-      'channel',
-      'channel_id',
-      'channel_hint',
-      'discord_channel',
-      'discord_channel_id',
-      'discord_thread',
-      'discord_thread_id',
-    ]);
-
-  if (!channel) return null;
-
-  const thread = process.env.CLAWHIP_DISCORD_THREAD || input?.discord_thread_id || input?.discord_thread || '';
-  const direct = {
-    channel,
-    channel_hint: channel,
-    discord_channel_id: channel,
-  };
-  if (thread) direct.discord_thread_id = thread;
-  return direct;
-}
-
-function collectHermesMetadata(input) {
-  const sources = [input, input?.context, input?.event_payload, input?.payload]
-    .filter((value) => value && typeof value === 'object');
-  const hermesSessionId =
-    process.env.HERMES_SESSION_ID ||
-    pickDiscordString(sources, ['hermes_session_id', 'hermesSessionId']);
-  const hermesWakeUrl =
-    process.env.HERMES_WAKE_URL ||
-    pickDiscordString(sources, ['hermes_wake_url', 'hermesWakeUrl']);
-  const direct = {};
-  if (hermesSessionId) direct.hermes_session_id = hermesSessionId;
-  if (hermesWakeUrl) direct.hermes_wake_url = hermesWakeUrl;
-  return Object.keys(direct).length > 0 ? direct : null;
-}
-
-function collectHermesDurableMetadata(input) {
-  const sources = [input, input?.context, input?.event_payload, input?.payload]
-    .filter((value) => value && typeof value === 'object');
-  const runId =
-    process.env.HERMES_DURABLE_AGENT_RUN_ID ||
-    pickDiscordString(sources, ['run_id', 'runId', 'hermes_durable_agent_run_id']);
-  const originId =
-    process.env.HERMES_ORIGIN_ID ||
-    pickDiscordString(sources, ['origin_id', 'originId', 'hermes_origin_id']);
-  const endpoint =
-    process.env.HERMES_DURABLE_AGENT_EVENT_ENDPOINT ||
-    pickDiscordString(sources, ['durable_agent_event_endpoint', 'hermes_durable_agent_event_endpoint']);
-  const direct = {};
-  if (runId) direct.run_id = runId;
-  if (originId) direct.origin_id = originId;
-  if (endpoint) direct.hermes_durable_agent_event_endpoint = endpoint;
-  return Object.keys(direct).length > 0 ? direct : null;
-}
-
-function pickDiscordString(sources, keys) {
-  for (const source of sources) {
-    for (const key of keys) {
-      const value = source[key];
-      if (typeof value === 'string' && value.trim()) {
-        return value.trim();
-      }
-    }
-  }
-  return '';
-}
-
 function truncate(text, maxLen = 200) {
   if (!text || typeof text !== 'string') return '';
   const trimmed = text.trim();
@@ -781,9 +611,6 @@ async function main() {
     loadProjectMetadata(worktreeRoot) ||
     loadProjectMetadata(eventCwd);
   const tmuxMetadata = collectTmuxMetadata(input, cwd);
-  const discordRoutingMetadata = collectDiscordRoutingMetadata(input);
-  const hermesMetadata = collectHermesMetadata(input);
-  const hermesDurableMetadata = collectHermesDurableMetadata(input);
   const eventName =
     input.hook_event_name || input.hookEventName || input.event_name || input.event || 'unknown';
   const payload = {
@@ -807,15 +634,6 @@ async function main() {
   };
   if (tmuxMetadata) {
     Object.assign(payload, tmuxMetadata);
-  }
-  if (discordRoutingMetadata) {
-    Object.assign(payload, discordRoutingMetadata);
-  }
-  if (hermesMetadata) {
-    Object.assign(payload, hermesMetadata);
-  }
-  if (hermesDurableMetadata) {
-    Object.assign(payload, hermesDurableMetadata);
   }
 
   if (projectMetadata && typeof projectMetadata === 'object') {
@@ -1232,50 +1050,6 @@ mod tests {
     }
 
     #[test]
-    fn native_hook_payload_channel_becomes_event_channel() {
-        let event = incoming_event_from_native_hook_json(&json!({
-            "provider": "codex",
-            "directory": "/repo/clawhip",
-            "event_name": "SessionStart",
-            "channel": "1510730239238606859",
-            "event_payload": {}
-        }))
-        .expect("event");
-
-        assert_eq!(event.channel.as_deref(), Some("1510730239238606859"));
-        assert_eq!(event.payload["channel"], json!("1510730239238606859"));
-        assert_eq!(event.payload["channel_hint"], json!("1510730239238606859"));
-    }
-
-    #[test]
-    fn native_hook_payload_discord_thread_id_becomes_event_channel() {
-        let event = incoming_event_from_native_hook_json(&json!({
-            "provider": "codex",
-            "directory": "/repo/clawhip",
-            "event_name": "SessionStart",
-            "discord_thread_id": "1510730239238606859",
-            "event_payload": {}
-        }))
-        .expect("event");
-
-        assert_eq!(event.channel.as_deref(), Some("1510730239238606859"));
-        assert_eq!(
-            event.payload["discord_thread_id"],
-            json!("1510730239238606859")
-        );
-        assert_eq!(event.payload["channel_hint"], json!("1510730239238606859"));
-    }
-
-    #[test]
-    fn generated_hook_script_mentions_discord_return_channel_env() {
-        let script = generated_hook_script();
-        assert!(script.contains("collectDiscordRoutingMetadata"));
-        assert!(script.contains("CLAWHIP_DISCORD_CHANNEL"));
-        assert!(script.contains("CLAWHIP_DISCORD_THREAD"));
-        assert!(script.contains("discord_thread_id"));
-    }
-
-    #[test]
     fn loads_project_metadata_from_project_json() {
         let dir = tempdir().expect("tempdir");
         fs::create_dir_all(dir.path().join(".clawhip")).unwrap();
@@ -1387,7 +1161,7 @@ mod tests {
         let fake_clawhip = fake_bin.join("clawhip");
         std::fs::write(
             &fake_clawhip,
-            "#!/bin/sh\ncat >/dev/null\necho 'fake native hook bridge failure' >&2\nexit 7\n",
+            "#!/bin/sh\necho 'fake native hook bridge failure' >&2\nexit 7\n",
         )
         .expect("write fake clawhip");
         let mut fake_perms = std::fs::metadata(&fake_clawhip)
@@ -1593,11 +1367,7 @@ mod tests {
         )
         .expect("write project metadata");
         std::fs::write(repo.join("README.md"), "init\n").expect("write");
-        git(&repo, &["add", "README.md"]);
-        // Grant's global gitignore intentionally ignores `.clawhip/` runtime
-        // state. Force-add this fixture metadata so the e2e test remains
-        // hermetic under that common developer setup.
-        git(&repo, &["add", "-f", ".clawhip/project.json"]);
+        git(&repo, &["add", "README.md", ".clawhip/project.json"]);
         git(
             &repo,
             &[
@@ -1771,49 +1541,5 @@ mod tests {
         assert!(script.contains("prompt_summary"));
         assert!(script.contains("stop_context"));
         assert!(script.contains("last_prompt_summary"));
-    }
-
-    #[test]
-    fn native_hook_payload_hermes_session_id() {
-        let event = incoming_event_from_native_hook_json(&json!({
-            "provider": "codex",
-            "directory": "/repo/clawhip",
-            "event_name": "Stop",
-            "event_payload": {
-                "hermes_session_id": "20260531_171628_05f25e"
-            }
-        }))
-        .expect("event");
-
-        assert_eq!(event.kind, "session.stopped");
-        assert_eq!(
-            event.payload["hermes_session_id"],
-            json!("20260531_171628_05f25e")
-        );
-        assert_eq!(
-            event
-                .template_context()
-                .get("hermes_session_id")
-                .map(String::as_str),
-            Some("20260531_171628_05f25e")
-        );
-    }
-
-    #[test]
-    fn generated_hook_script_mentions_hermes_session_env() {
-        let script = super::generated_hook_script();
-        assert!(script.contains("HERMES_SESSION_ID"));
-        assert!(script.contains("HERMES_WAKE_URL"));
-        assert!(script.contains("hermes_session_id"));
-    }
-
-    #[test]
-    fn generated_hook_script_mentions_hermes_durable_identity_env() {
-        let script = generated_hook_script();
-        assert!(script.contains("HERMES_DURABLE_AGENT_RUN_ID"));
-        assert!(script.contains("HERMES_ORIGIN_ID"));
-        assert!(script.contains("HERMES_DURABLE_AGENT_EVENT_ENDPOINT"));
-        assert!(script.contains("run_id"));
-        assert!(script.contains("origin_id"));
     }
 }

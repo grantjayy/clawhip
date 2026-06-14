@@ -1,502 +1,264 @@
 use std::time::Duration;
 
+use async_trait::async_trait;
 use hmac::{Hmac, Mac};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 use sha2::Sha256;
 
 use crate::Result;
-use crate::sink::{HttpTarget, SinkMessage, SinkTarget};
 
-const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+use super::{Sink, SinkMessage, SinkTarget};
+
+type HmacSha256 = Hmac<Sha256>;
+const HERMES_DURABLE_BODY: &str = "hermes_durable";
+const HERMES_SOURCE: &str = "clawhip:omx";
 
 #[derive(Clone)]
 pub struct HttpSink {
     client: reqwest::Client,
 }
 
-impl Default for HttpSink {
-    fn default() -> Self {
-        Self::with_timeout(DEFAULT_HTTP_TIMEOUT)
-            .expect("default HTTP sink timeout configuration should be valid")
-    }
-}
-
 impl HttpSink {
-    pub fn with_timeout(timeout: Duration) -> Result<Self> {
-        let client = reqwest::Client::builder().timeout(timeout).build()?;
+    pub fn new() -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()?;
         Ok(Self { client })
     }
+}
 
-    pub async fn send_http(&self, target: &HttpTarget, message: &SinkMessage) -> Result<()> {
-        let logical_event_id = logical_event_id(message);
-        let body = if target.body.as_deref().map(str::trim) == Some("hermes_durable") {
-            hermes_durable_body(message, logical_event_id.as_deref())?
-        } else {
-            json!({
-                "source": "clawhip",
-                "event_type": message.event_kind,
-                "summary": message.content,
-                "payload": message.payload,
-                "event_id": logical_event_id.as_deref(),
-                "idempotency_key": logical_event_id.as_deref(),
-                "correlation_id": message.telemetry.as_ref().map(|t| t.correlation_id.as_str()),
-                "target": message.telemetry.as_ref().map(|t| t.target.as_str()),
-            })
+#[async_trait]
+impl Sink for HttpSink {
+    async fn send(&self, target: &SinkTarget, message: &SinkMessage) -> Result<()> {
+        let SinkTarget::HttpEndpoint {
+            url,
+            hmac_secret_env,
+            body,
+        } = target
+        else {
+            return Err("cannot send non-HTTP target via HTTP sink".into());
         };
-        let body_bytes = serde_json::to_vec(&body)?;
 
-        let mut headers = HeaderMap::new();
-        for (name, value) in &target.headers {
-            let header_name = HeaderName::from_bytes(name.as_bytes())?;
-            let header_value = HeaderValue::from_str(value)?;
-            headers.insert(header_name, header_value);
+        if body.as_deref() != Some(HERMES_DURABLE_BODY) {
+            return Err("HTTP sink only supports body = \"hermes_durable\"".into());
         }
-        headers
-            .entry(reqwest::header::CONTENT_TYPE)
-            .or_insert(HeaderValue::from_static("application/json"));
-
-        if let Some(request_id) = logical_event_id.as_deref().or_else(|| {
-            message
-                .telemetry
-                .as_ref()
-                .map(|t| t.correlation_id.trim())
-                .filter(|v| !v.is_empty())
-        }) {
-            headers.insert("x-request-id", HeaderValue::from_str(request_id)?);
-        }
-
-        if let Some(env_name) = target
-            .hmac_secret_env
+        let secret_env = hmac_secret_env
             .as_deref()
             .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            let secret = std::env::var(env_name)
-                .map_err(|_| format!("HTTP sink signing secret env var '{env_name}' is not set"))?;
-            if secret.trim().is_empty() {
-                return Err(
-                    format!("HTTP sink signing secret env var '{env_name}' is empty").into(),
-                );
-            }
-            let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())?;
-            mac.update(&body_bytes);
-            let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
-            headers.insert("x-hub-signature-256", HeaderValue::from_str(&signature)?);
+            .filter(|value| !value.is_empty())
+            .ok_or("HTTP durable sink missing hmac_secret_env")?;
+        let secret = std::env::var(secret_env)
+            .map_err(|_| format!("HTTP durable sink secret env '{secret_env}' is not set"))?;
+        if secret.is_empty() {
+            return Err(format!("HTTP durable sink secret env '{secret_env}' is empty").into());
         }
 
+        let body = hermes_durable_body(message)?;
+        let bytes = serde_json::to_vec(&body)?;
+        let signature = github_signature(&bytes, secret.as_bytes())?;
         let response = self
             .client
-            .post(&target.url)
-            .headers(headers)
-            .body(body_bytes)
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header("X-Hub-Signature-256", signature)
+            .body(bytes)
             .send()
-            .await
-            .map_err(|error| format!("HTTP sink request failed: {}", error.without_url()))?;
-        let status = response.status();
-        if status.is_success() {
+            .await?;
+
+        if response.status().is_success() {
             return Ok(());
         }
+
+        let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        let truncated: String = body.chars().take(300).collect();
-        Err(format!("HTTP sink POST failed with status {status}: {truncated}").into())
+        Err(format!("HTTP sink request failed with {status}: {body}").into())
     }
 }
 
-fn logical_event_id(message: &SinkMessage) -> Option<String> {
-    ["event_id", "idempotency_key"]
-        .into_iter()
-        .filter_map(|key| message.payload.get(key))
-        .filter_map(|value| value.as_str())
-        .map(str::trim)
-        .find(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+impl Default for HttpSink {
+    fn default() -> Self {
+        Self::new().expect("reqwest client")
+    }
 }
 
-fn hermes_durable_body(message: &SinkMessage, logical_event_id: Option<&str>) -> Result<Value> {
-    let run_id = payload_string(&message.payload, "run_id")
-        .or_else(|| payload_string(&message.payload, "hermes_durable_agent_run_id"))
-        .ok_or("Hermes durable HTTP body requires run_id")?;
-    let origin_id = payload_string(&message.payload, "origin_id")
-        .or_else(|| payload_string(&message.payload, "hermes_origin_id"))
-        .ok_or("Hermes durable HTTP body requires origin_id")?;
-    let event_type = hermes_event_type(message)?;
-    let status = payload_string(&message.payload, "status").unwrap_or_else(|| event_type.clone());
-    let event_id = logical_event_id
-        .map(ToOwned::to_owned)
-        .or_else(|| payload_string(&message.payload, "event_id"))
-        .unwrap_or_else(|| {
-            message
-                .telemetry
-                .as_ref()
-                .map(|t| t.correlation_id.clone())
-                .unwrap_or_else(|| format!("clawhip:{run_id}:{event_type}"))
-        });
+pub(crate) fn hermes_durable_body(message: &SinkMessage) -> Result<Value> {
+    let (event_type, default_status) = match message.event_kind.as_str() {
+        "session.finished" => ("completed", "success"),
+        "session.failed" => ("failed", "failed"),
+        "session.blocked" => ("blocked", "blocked"),
+        other => return Err(format!("unsupported Hermes durable event '{other}'").into()),
+    };
+
+    let run_id = required_payload_string(&message.payload, "run_id")?;
+    let origin_id = required_payload_string(&message.payload, "origin_id")?;
+    let event_id = first_payload_string(&message.payload, &["event_id", "idempotency_key"])
+        .ok_or("Hermes durable body missing required payload field 'event_id'")?;
+    let status = first_payload_string(&message.payload, &["status"])
+        .unwrap_or_else(|| default_status.to_string());
+    let durable_message = first_payload_string(&message.payload, &["message", "summary", "reason"])
+        .unwrap_or_else(|| message.content.clone());
+
     Ok(json!({
         "run_id": run_id,
         "origin_id": origin_id,
         "event_type": event_type,
         "status": status,
-        "message": message.content,
         "event_id": event_id,
-        "source": "clawhip:omx",
+        "message": durable_message,
+        "source": HERMES_SOURCE,
     }))
 }
 
-fn hermes_event_type(message: &SinkMessage) -> Result<String> {
-    let raw = payload_string(&message.payload, "event_type")
-        .or_else(|| payload_string(&message.payload, "event"))
-        .unwrap_or_else(|| message.event_kind.clone());
-    let normalized = match raw.trim().to_ascii_lowercase().as_str() {
-        "session-end" | "session.finished" | "session.finish" | "session.completed"
-        | "agent.finished" | "completed" => "completed",
-        "ask-user-question" | "question" | "session.question" | "agent.question" => "question",
-        "session.failed" | "agent.failed" | "failed" => "failed",
-        "session.blocked" | "agent.blocked" | "blocked" | "action-required" => "blocked",
-        "session.stopped" => {
-            return Err(
-                "raw session.stopped is audit-only and cannot be a Hermes durable wake event"
-                    .into(),
-            );
-        }
-        _ => return Err("Hermes durable HTTP body requires canonical event_type".into()),
-    };
-    Ok(normalized.to_string())
+pub(crate) fn github_signature(body: &[u8], secret: &[u8]) -> Result<String> {
+    let mut mac = HmacSha256::new_from_slice(secret)?;
+    mac.update(body);
+    let digest = mac.finalize().into_bytes();
+    Ok(format!("sha256={}", hex_lower(&digest)))
 }
 
-fn payload_string(payload: &Value, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+fn required_payload_string(payload: &Value, key: &str) -> Result<String> {
+    first_payload_string(payload, &[key])
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("Hermes durable body missing required payload field '{key}'").into())
 }
 
-#[async_trait::async_trait]
-impl crate::sink::Sink for HttpSink {
-    async fn send(&self, target: &SinkTarget, message: &SinkMessage) -> Result<()> {
-        match target {
-            SinkTarget::Http(target) => self.send_http(target, message).await,
-            _ => Err("cannot send non-HTTP target via HTTP sink".into()),
-        }
+fn first_payload_string(payload: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        payload.get(*key).and_then(|value| match value {
+            Value::String(text) => {
+                let trimmed = text.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }
+            Value::Number(number) => Some(number.to_string()),
+            Value::Bool(value) => Some(value.to_string()),
+            _ => None,
+        })
+    })
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
     }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::events::MessageFormat;
-    use crate::sink::{Sink, SinkTelemetry};
-    use axum::Router;
-    use axum::body::Bytes;
-    use axum::extract::State;
-    use axum::http::{HeaderMap as AxumHeaderMap, StatusCode};
-    use axum::routing::post;
-    use std::collections::BTreeMap;
-    use std::net::SocketAddr;
-    use std::sync::{Arc, Mutex};
-    use tokio::net::TcpListener;
 
-    #[derive(Default)]
-    struct Capture {
-        headers: Option<AxumHeaderMap>,
-        body: Option<Vec<u8>>,
-        status: StatusCode,
-    }
-
-    async fn start_server(status: StatusCode) -> (String, Arc<Mutex<Capture>>) {
-        let capture = Arc::new(Mutex::new(Capture {
-            status,
-            ..Capture::default()
-        }));
-        async fn handler(
-            State(capture): State<Arc<Mutex<Capture>>>,
-            headers: AxumHeaderMap,
-            body: Bytes,
-        ) -> StatusCode {
-            let mut guard = capture.lock().unwrap();
-            guard.headers = Some(headers);
-            guard.body = Some(body.to_vec());
-            guard.status
-        }
-        let app = Router::new()
-            .route("/wake", post(handler))
-            .with_state(capture.clone());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr: SocketAddr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (format!("http://{addr}/wake"), capture)
-    }
-
-    fn message() -> SinkMessage {
+    fn message(event_kind: &str, payload: Value) -> SinkMessage {
         SinkMessage {
-            event_kind: "session.stopped".into(),
+            event_kind: event_kind.into(),
             format: MessageFormat::Compact,
-            content: "done".into(),
-            payload: json!({"hermes_session_id":"sess-1"}),
-            telemetry: Some(SinkTelemetry {
-                correlation_id: "corr-1".into(),
-                route_result: None,
-                route_index: Some(0),
-                target: "http:redacted".into(),
-                batch_count: None,
+            content: "rendered fallback".into(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn renders_finished_durable_body() {
+        let body = hermes_durable_body(&message(
+            "session.finished",
+            json!({
+                "run_id": "dar_1",
+                "origin_id": "agent:main",
+                "event_id": "evt_1",
+                "message": "done"
             }),
-        }
+        ))
+        .expect("body");
+
+        assert_eq!(body["event_type"], "completed");
+        assert_eq!(body["status"], "success");
+        assert_eq!(body["source"], "clawhip:omx");
+        assert_eq!(body["message"], "done");
     }
 
-    fn message_with_event_id(event_id: &str) -> SinkMessage {
-        SinkMessage {
-            payload: json!({"hermes_session_id":"sess-1", "event_id": event_id}),
-            ..message()
-        }
-    }
-
-    #[tokio::test]
-    async fn http_sink_posts_json_headers_and_signature() {
-        unsafe {
-            std::env::set_var("CLAWHIP_TEST_HMAC_SECRET", "secret");
-        }
-        let (url, capture) = start_server(StatusCode::ACCEPTED).await;
-        let target = SinkTarget::Http(HttpTarget {
-            url,
-            headers: BTreeMap::from([("X-Test".into(), "ok".into())]),
-            hmac_secret_env: Some("CLAWHIP_TEST_HMAC_SECRET".into()),
-            body: None,
-        });
-        HttpSink::default().send(&target, &message()).await.unwrap();
-
-        let guard = capture.lock().unwrap();
-        let headers = guard.headers.as_ref().unwrap();
-        let body = guard.body.as_ref().unwrap();
-        assert_eq!(headers.get("x-test").unwrap(), "ok");
-        assert_eq!(headers.get("x-request-id").unwrap(), "corr-1");
-        let sig = headers
-            .get("x-hub-signature-256")
-            .unwrap()
-            .to_str()
-            .unwrap();
-        let mut mac = Hmac::<Sha256>::new_from_slice(b"secret").unwrap();
-        mac.update(body);
-        assert_eq!(
-            sig,
-            format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
-        );
-        let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
-        assert_eq!(parsed["source"], "clawhip");
-        assert_eq!(parsed["event_type"], "session.stopped");
-        assert_eq!(parsed["correlation_id"], "corr-1");
-    }
-
-    #[tokio::test]
-    async fn http_sink_uses_payload_event_id_as_request_identity() {
-        let (url, capture) = start_server(StatusCode::ACCEPTED).await;
-        let target = SinkTarget::Http(HttpTarget {
-            url,
-            headers: BTreeMap::from([("X-Request-ID".into(), "corr-override".into())]),
-            hmac_secret_env: None,
-            body: None,
-        });
-        HttpSink::default()
-            .send(&target, &message_with_event_id("event-2"))
-            .await
-            .unwrap();
-
-        let guard = capture.lock().unwrap();
-        let headers = guard.headers.as_ref().unwrap();
-        let body = guard.body.as_ref().unwrap();
-        assert_eq!(headers.get("x-request-id").unwrap(), "event-2");
-        let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
-        assert_eq!(parsed["event_id"], "event-2");
-        assert_eq!(parsed["idempotency_key"], "event-2");
-        assert_eq!(parsed["correlation_id"], "corr-1");
-    }
-
-    #[tokio::test]
-    async fn http_sink_missing_signing_env_fails_closed() {
-        unsafe {
-            std::env::remove_var("CLAWHIP_MISSING_HMAC_SECRET");
-        }
-        let (url, _capture) = start_server(StatusCode::ACCEPTED).await;
-        let target = SinkTarget::Http(HttpTarget {
-            url,
-            headers: Default::default(),
-            hmac_secret_env: Some("CLAWHIP_MISSING_HMAC_SECRET".into()),
-            body: None,
-        });
-        let err = HttpSink::default()
-            .send(&target, &message())
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("CLAWHIP_MISSING_HMAC_SECRET"));
-    }
-
-    #[tokio::test]
-    async fn http_sink_transport_error_redacts_url() {
-        let target = SinkTarget::Http(HttpTarget {
-            url: "http://127.0.0.1:9/wake?token=secret#fragment".into(),
-            headers: Default::default(),
-            hmac_secret_env: None,
-            body: None,
-        });
-
-        let err = HttpSink::default()
-            .send(&target, &message())
-            .await
-            .unwrap_err()
-            .to_string();
-
-        assert!(!err.contains("token"));
-        assert!(!err.contains("secret"));
-        assert!(!err.contains("fragment"));
-        assert!(!err.contains("/wake"));
-    }
-
-    #[tokio::test]
-    async fn http_sink_request_timeout_is_bounded() {
-        let app = Router::new().route(
-            "/slow",
-            post(|| async {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                StatusCode::ACCEPTED
+    #[test]
+    fn renders_failed_and_blocked_status_defaults() {
+        let failed = hermes_durable_body(&message(
+            "session.failed",
+            json!({
+                "run_id": "dar_1", "origin_id": "origin", "event_id": "evt"
             }),
-        );
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr: SocketAddr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        let target = SinkTarget::Http(HttpTarget {
-            url: format!("http://{addr}/slow?token=secret"),
-            headers: Default::default(),
-            hmac_secret_env: None,
-            body: None,
-        });
+        ))
+        .expect("failed");
+        let blocked = hermes_durable_body(&message(
+            "session.blocked",
+            json!({
+                "run_id": "dar_1", "origin_id": "origin", "event_id": "evt2"
+            }),
+        ))
+        .expect("blocked");
 
-        let err = HttpSink::with_timeout(Duration::from_millis(25))
-            .unwrap()
-            .send(&target, &message())
-            .await
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("HTTP sink request failed"));
-        assert!(!err.contains("token=secret"));
+        assert_eq!(failed["event_type"], "failed");
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(blocked["event_type"], "blocked");
+        assert_eq!(blocked["status"], "blocked");
     }
 
-    #[tokio::test]
-    async fn http_sink_non_2xx_returns_error() {
-        let (url, _capture) = start_server(StatusCode::BAD_GATEWAY).await;
-        let target = SinkTarget::Http(HttpTarget {
-            url,
-            headers: Default::default(),
-            hmac_secret_env: None,
-            body: None,
-        });
-        let err = HttpSink::default()
-            .send(&target, &message())
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("502 Bad Gateway"));
+    #[test]
+    fn preserves_payload_status_and_event_id_alias() {
+        let body = hermes_durable_body(&message(
+            "session.finished",
+            json!({
+                "run_id": "dar_1",
+                "origin_id": "origin",
+                "idempotency_key": "idem",
+                "status": "custom-ok",
+                "summary": "summary text"
+            }),
+        ))
+        .expect("body");
+
+        assert_eq!(body["event_id"], "idem");
+        assert_eq!(body["status"], "custom-ok");
+        assert_eq!(body["message"], "summary text");
     }
 
-    #[tokio::test]
-    async fn hermes_durable_body_posts_top_level_endpoint_contract() {
-        let (url, capture) = start_server(StatusCode::ACCEPTED).await;
-        let target = SinkTarget::Http(HttpTarget {
-            url,
-            headers: Default::default(),
-            hmac_secret_env: None,
-            body: Some("hermes_durable".into()),
-        });
-        let mut message = message_with_event_id("omx-logical-1");
-        message.event_kind = "session-end".into();
-        message.content = "OMX semantic lifecycle event: session-end".into();
-        message.payload = json!({
-            "run_id": "dar_1",
-            "origin_id": "agent:main:discord:thread:1",
-            "event_type": "session-end",
-            "event_id": "omx-logical-1",
-            "status": "success",
-            "hermes_wake_url": "http://127.0.0.1:9/stale",
-            "hermes_session_id": "stale-session"
-        });
-
-        HttpSink::default().send(&target, &message).await.unwrap();
-
-        let guard = capture.lock().unwrap();
-        let parsed: serde_json::Value =
-            serde_json::from_slice(guard.body.as_ref().unwrap()).unwrap();
-        assert_eq!(parsed["run_id"], "dar_1");
-        assert_eq!(parsed["origin_id"], "agent:main:discord:thread:1");
-        assert_eq!(parsed["event_type"], "completed");
-        assert_eq!(parsed["status"], "success");
-        assert_eq!(
-            parsed["message"],
-            "OMX semantic lifecycle event: session-end"
-        );
-        assert_eq!(parsed["event_id"], "omx-logical-1");
-        assert_eq!(parsed["source"], "clawhip:omx");
+    #[test]
+    fn fails_closed_without_required_ids_or_on_stopped() {
         assert!(
-            parsed.get("payload").is_none(),
-            "generic wrapped HTTP body is insufficient for Hermes durable delivery"
+            hermes_durable_body(&message(
+                "session.finished",
+                json!({
+                    "origin_id": "origin", "event_id": "evt"
+                })
+            ))
+            .is_err()
         );
-        assert!(parsed.get("hermes_wake_url").is_none());
-        assert!(parsed.get("hermes_session_id").is_none());
+        assert!(
+            hermes_durable_body(&message(
+                "session.finished",
+                json!({
+                    "run_id": "dar", "event_id": "evt"
+                })
+            ))
+            .is_err()
+        );
+        assert!(
+            hermes_durable_body(&message(
+                "session.stopped",
+                json!({
+                    "run_id": "dar", "origin_id": "origin", "event_id": "evt"
+                })
+            ))
+            .is_err()
+        );
     }
 
-    #[tokio::test]
-    async fn hermes_durable_body_fails_closed_without_durable_identity_even_with_old_wake_fields() {
-        let (url, _capture) = start_server(StatusCode::ACCEPTED).await;
-        let target = SinkTarget::Http(HttpTarget {
-            url,
-            headers: Default::default(),
-            hmac_secret_env: None,
-            body: Some("hermes_durable".into()),
-        });
-        let mut message = message();
-        message.event_kind = "session-end".into();
-        message.payload = json!({
-            "event_type": "session-end",
-            "hermes_wake_url": "http://127.0.0.1:9/stale",
-            "hermes_session_id": "stale-session"
-        });
-
-        let err = HttpSink::default()
-            .send(&target, &message)
-            .await
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("requires run_id"));
-    }
-
-    #[tokio::test]
-    async fn hermes_durable_body_rejects_raw_session_stopped() {
-        let (url, _capture) = start_server(StatusCode::ACCEPTED).await;
-        let target = SinkTarget::Http(HttpTarget {
-            url,
-            headers: Default::default(),
-            hmac_secret_env: None,
-            body: Some("hermes_durable".into()),
-        });
-        let mut message = message();
-        message.payload = json!({
-            "run_id": "dar_1",
-            "origin_id": "origin",
-            "event_type": "session.stopped"
-        });
-
-        let err = HttpSink::default()
-            .send(&target, &message)
-            .await
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("audit-only"));
+    #[test]
+    fn signs_exact_body_with_github_header_convention() {
+        let signature =
+            github_signature(br#"{"run_id":"dar"}"#, b"durable-secret").expect("signature");
+        assert_eq!(
+            signature,
+            "sha256=05e8c1d100b93ff74e6c851d7fd2fb967565ea642a9e6fc2cbbb2850a925bde5"
+        );
     }
 }

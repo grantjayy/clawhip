@@ -1,5 +1,4 @@
 use std::io::Read;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -32,13 +31,6 @@ impl Cli {
             .clone()
             .unwrap_or_else(crate::config::default_config_path)
     }
-
-    pub fn runtime_worker_threads(&self) -> Option<usize> {
-        match self.command.as_ref() {
-            Some(Commands::Start { worker_threads, .. }) => worker_threads.map(NonZeroUsize::get),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -48,9 +40,6 @@ pub enum Commands {
     Start {
         #[arg(long)]
         port: Option<u16>,
-        /// Override the Tokio worker thread count for the daemon runtime.
-        #[arg(long)]
-        worker_threads: Option<NonZeroUsize>,
     },
     /// Check daemon health/status.
     Status,
@@ -718,22 +707,6 @@ mod tests {
     use crate::event::compat::from_incoming_event;
     use clap::CommandFactory;
     use clap::error::ErrorKind;
-
-    #[test]
-    fn parses_start_subcommand_with_worker_threads_override() {
-        let cli = Cli::parse_from(["clawhip", "start", "--worker-threads", "2"]);
-
-        let Commands::Start {
-            port,
-            worker_threads,
-        } = cli.command.expect("start command")
-        else {
-            panic!("expected start command");
-        };
-
-        assert_eq!(port, None);
-        assert_eq!(worker_threads, Some(NonZeroUsize::new(2).unwrap()));
-    }
 
     #[test]
     fn parses_emit_subcommand_with_top_level_fields() {
